@@ -1,0 +1,50 @@
+Need to build an agent for data retrieval from GET requests from natural language prompts.
+Learning LangGraph.
+
+FLOW:
+1. User prompt (for ex: "Show me orders from last 5 days with payment mode prepaid")
+2. Planning LLM
+    (
+        "plan": {
+            "intent": "Fetch and filter orders by payment mode from last 5 days",
+            "query": "Show me orders from last 5 days with payment mode prepaid",
+            "steps": [
+                {
+                    "depends_on": [],
+                    "description": "Fetch all orders from last 5 days",
+                    "id": 1,
+                    "params": {
+                    "end_date": "2026-02-06 23:59:59",
+                    "start_date": "2026-02-01 00:00:00"
+                    },
+                    "save_as": "last_5_days_orders",
+                    "tool": "get_all_orders"
+                }
+            ],
+            "manipulation": [
+                "required": "true",
+                "type": "filter",
+            ]
+        },
+        "success": true
+    )
+
+3. Execute tool directly to return result JSON. if manipulation.required is "false", display result JSON. ELSE if manipulation.required is "true", save result JSON and proceed to step 4.
+
+4. Filtering LLM
+    (
+        input: result.json schema
+        aim: match input data schema & enum type (if categorical) with prompt and return final filtering params as follows:
+        filter = [
+            {
+                "param": "payment_mode", (learnt through schema)
+                "operator": "=",
+                "value": "PrePaid", (as present in schema)
+            }
+        ]
+    )
+
+5. Return filtered result JSON.
+
+
+How will you execute this using LangGraph?
