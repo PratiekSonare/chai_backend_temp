@@ -88,7 +88,6 @@ def extract_schema_with_enums(data: dict | list, sample_size: int = 100) -> dict
             }
         return schema
 
-
 # Node functions
 def planning_node(state: AgentState) -> AgentState:
     """Planning LLM generates execution plan"""
@@ -110,6 +109,7 @@ def planning_node(state: AgentState) -> AgentState:
             "current_step_index": 0,
             "error": None
         }
+    
     except Exception as e:
         print(f"❌ [PLANNING] Error: {str(e)}", flush=True)
         return {**state, "error": f"Planning error: {str(e)}"}
@@ -119,10 +119,13 @@ def execute_tool_node(state: AgentState) -> AgentState:
     step_idx = state["current_step_index"]
     total_steps = len(state["plan"]["steps"]) if state["plan"] else 0
     print(f"🔧 [EXECUTE_TOOL] Step {step_idx + 1}/{total_steps} | Retry: {state.get('retry_count', 0)}", flush=True)
+
+    print(state, flush=True)
+
     try:
         plan = state["plan"]
         step = plan["steps"][state["current_step_index"]]
-        
+
         # Resolve dependencies from cache
         resolved_params = step["params"].copy()
         for dep_id in step["depends_on"]:
@@ -137,13 +140,19 @@ def execute_tool_node(state: AgentState) -> AgentState:
             resolved_params[dep_step["save_as"]] = get_cached_result(ref_key)
         
         # Execute tool (map tool name to actual function)
-        print(f"✅ [EXECUTE_TOOL] Tool executed: {step['tool']} | Records: {len(result) if isinstance(result, list) else 1}", flush=True)
-        
         tool_function = TOOL_REGISTRY.get(step["tool"])
         if not tool_function:
             return {**state, "error": f"Tool {step['tool']} not found"}
-        
+
         result = tool_function(**resolved_params)
+        
+        # Log successful execution
+        if isinstance(result, list):
+            print(f"✅ [EXECUTE_TOOL] Tool executed: {step['tool']} | Records: {len(result)}", flush=True)
+        elif isinstance(result, dict) and "available_fields" in result:
+            print(f"✅ [EXECUTE_TOOL] Tool executed: {step['tool']} | Schema info retrieved", flush=True)
+        else:
+            print(f"✅ [EXECUTE_TOOL] Tool executed: {step['tool']} | Result type: {type(result).__name__}", flush=True)
         
         # Cache the actual result data (not in state)
         result_key = cache_result(result, key=step["save_as"])
@@ -165,8 +174,7 @@ def execute_tool_node(state: AgentState) -> AgentState:
             "current_step_index": state["current_step_index"] + 1,
             "error": None,
             "retry_count": 0
-        }
-        print(f"❌ [EXECUTE_TOOL] Error: {str(e)}", flush=True)
+        } 
         
     except Exception as e:
         # Retry logic
@@ -176,11 +184,13 @@ def execute_tool_node(state: AgentState) -> AgentState:
                 "retry_count": state["retry_count"] + 1,
                 "error": f"Tool execution retry {state['retry_count'] + 1}: {str(e)}"
             }
+        
+        print(f"❌ [EXECUTE_TOOL] Error: {str(e)}", flush=True)
         return {**state, "error": f"Tool execution failed: {str(e)}"}
-print(f"🔍 [FILTERING] Extracting filters from query", flush=True)
     
 def filtering_node(state: AgentState) -> AgentState:
     """Filtering LLM generates filter parameters using schema with categorical values"""
+    print(f"🔍 [FILTERING] Extracting filters from query", flush=True)
     try:
         plan = state["plan"]
         # Get schema (not data!) from the last step
@@ -197,6 +207,9 @@ def filtering_node(state: AgentState) -> AgentState:
 
         print(f"✅ [FILTERING] Filters extracted: {len(filter_response.get('filters', []))} filter(s)", flush=True)
         
+
+        # print(state, flush=True)
+
         return {
             **state,
             "filters": filter_response.get("filters", []),
@@ -556,12 +569,20 @@ def should_continue_execution(state: AgentState) -> Literal["execute_tool", "che
     if state["current_step_index"] < len(state["plan"]["steps"]):
         return "execute_tool"
     
+    # Schema discovery queries go directly to output (no filtering needed)
+    if state["plan"].get("query_type") == "schema_discovery":
+        return "check_manipulation"  # Will route to no_filter
+    
     return "check_manipulation"
 
 def needs_manipulation(state: AgentState) -> Literal["filtering", "no_filter", "error"]:
     """Check if filtering/manipulation is required"""
     if state["error"]:
         return "error"
+    
+    # Schema discovery queries never need filtering
+    if state["plan"].get("query_type") == "schema_discovery":
+        return "no_filter"
     
     if state["plan"]["manipulation"]["required"]:
         return "filtering"
@@ -578,11 +599,18 @@ def check_error(state: AgentState) -> Literal["replan", "end"]:
     return "replan"
 
 def is_comparison_query(state: AgentState) -> Literal["grouping", "execute_tool", "error"]:
-    """Check if query requires comparison"""
+    """Check if query requires comparison or is schema discovery"""
     if state["error"]:
         return "error"
     
-    if state["plan"].get("query_type") == "comparison":
+    query_type = state["plan"].get("query_type")
+    
+    # Schema discovery queries go through standard execute_tool flow
+    # They just return schema info instead of data
+    if query_type == "schema_discovery":
+        return "execute_tool"
+    
+    if query_type == "comparison":
         return "grouping"
     
     return "execute_tool"

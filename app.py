@@ -4,6 +4,7 @@ Flask API Server for Order Analysis Workflow
 import os
 import sys
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -13,6 +14,9 @@ load_dotenv()
 from workflow import app as workflow_app, AgentState
 
 app = Flask(__name__)
+
+# Enable CORS for localhost:3000
+CORS(app, origins=["http://localhost:3000"])
 
 # Disable Flask's default logger to prevent duplicate logs
 import logging
@@ -131,6 +135,14 @@ def process_query():
 def get_examples():
     """Get example queries"""
     return jsonify({
+        "schema_discovery_queries": [
+            "What fields are available in the orders data?",
+            "What are the allowed values for payment_mode?",
+            "Which date ranges does this API support?",
+            "What marketplaces do we have data for?",
+            "Show me the complete data schema",
+            "What enum values are available for order_status?"
+        ],
         "standard_queries": [
             "Show me orders from last 5 days with payment mode prepaid",
             "Get all open orders from last week",
@@ -140,7 +152,8 @@ def get_examples():
         "comparison_queries": [
             "Compare orders between Shopify13 and Flipkart from the last 10 days",
             "Compare prepaid vs COD orders from last week",
-            "Compare Karnataka vs Maharashtra order volumes in last 15 days"
+            "Compare Karnataka vs Maharashtra order volumes in last 15 days",
+            "Compare Shopify13, Flipkart, and Amazon sales from last month"
         ]
     })
 

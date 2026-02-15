@@ -1,0 +1,64 @@
+QUERY TYPES YOU SHOULD EXPLICITLY SUPPORT
+
+A. Schema & Data Discovery Prompts
+Examples:
+- What fields are available in sales data?
+- Which date ranges does this API support?
+- What are the allowed enum values for order_status?
+- Do we have region-wise data or only country-level?
+
+B. Cross-Field Logical Conditions
+Examples:
+- Orders where revenue > 10k AND discount < 5%
+- Products that sold well in Q1 but poorly in Q2
+- Customers who bought A but not B
+
+C. Temporal Reasoning & Time Windows
+Examples:
+- Compare last 7 days vs previous 7 days
+- MoM growth for the past 6 months
+- Same period last year
+- Rolling 30-day average
+
+D. Aggregation & Grouping (Light Analytics)
+Examples:
+- Total sales per region
+- Average order value by category
+- Count of orders per day
+
+E. Cross-API / Cross-Dataset Queries
+Examples:
+- Sales data joined with inventory
+- Orders + customer tier
+- Revenue vs marketing spend
+
+F. Derived / Computed Fields
+Examples:
+- Revenue after tax
+- Profit = revenue − cost
+- Conversion rate
+
+G. Comparison Beyond Simple Filters
+Examples:
+- Top 5 vs bottom 5 products
+- Region A vs Region B
+- This SKU vs category average
+
+H. Data Quality & Completeness Queries
+Examples:
+- Which records have missing values?
+- Are there nulls in price?
+- How many orders failed validation?
+
+I. Output-Format-Driven Prompts
+Examples:
+- Give this as a CSV
+- Return a table with only 5 columns
+- Paginated response
+- JSON grouped by region
+
+J. Constraint-Based Queries
+Examples:
+- Show me at most 20 records
+- Only include high-confidence data
+- Exclude test / sandbox records

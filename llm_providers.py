@@ -13,7 +13,7 @@ class OpenRouterLLM:
     
     def __init__(self):
         self.api_key = os.getenv("OPENROUTER_API_KEY")
-        self.model = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.1-70b-instruct")
+        self.model = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
         self.site_url = os.getenv("OPENROUTER_SITE_URL", "http://localhost:5000")
         self.site_name = os.getenv("OPENROUTER_SITE_NAME", "Order Analysis Workflow")
         self.base_url = "https://openrouter.ai/api/v1/chat/completions"
@@ -60,12 +60,76 @@ Today's date is {current_date}.
 
 User Query: "{query}"
 
+Available Tools:
+1. get_all_orders - Fetch order data for a date range
+2. get_schema_info - Get schema/metadata about available fields and constraints
+   - Optional param "field": Specify a field name (e.g., "payment_mode") to get only that field's info
+   - Without "field": Returns complete schema for all fields
+
 Your task is to create an execution plan in JSON format. Analyze the query and determine:
-1. Is this a comparison query (comparing two or more groups)? Set query_type to "comparison" or "standard"
-2. Extract the date range from the query (convert relative dates like "last 5 days" to absolute dates)
-3. Determine if filtering/manipulation is needed after fetching data
+1. Query Type:
+   - "schema_discovery": If asking about available fields, data structure, allowed values, date ranges, etc.
+   - "comparison": If comparing two or more groups (marketplaces, payment modes, states, etc.)
+   - "standard": Regular data fetch with optional filtering
+
+2. Tool Selection:
+   - Use "get_schema_info" for questions about data structure, available fields, enum values, constraints
+     * If asking about a SPECIFIC field (e.g., "what are allowed values for payment_mode"), include "field" parameter
+     * If asking generally (e.g., "what fields are available"), omit "field" parameter
+   - Use "get_all_orders" for actual data queries
+
+3. Extract date range (for data queries only - convert relative dates like "last 5 days" to absolute dates)
+
+4. Determine if filtering/manipulation is needed after fetching data
 
 Return ONLY a valid JSON object with this structure:
+
+For schema discovery queries (specific field):
+{{
+  "query_type": "schema_discovery",
+  "steps": [
+    {{
+      "id": "step1",
+      "tool": "get_schema_info",
+      "params": {{
+        "entity": "orders",
+        "field": "payment_mode"
+      }},
+      "depends_on": [],
+      "save_as": "schema_info"
+    }}
+  ],
+  "manipulation": {{
+    "required": false,
+    "type": null
+  }},
+  "base_params": {{}},
+  "tool": "get_schema_info"
+}}
+
+For schema discovery queries (all fields):
+{{
+  "query_type": "schema_discovery",
+  "steps": [
+    {{
+      "id": "step1",
+      "tool": "get_schema_info",
+      "params": {{
+        "entity": "orders"
+      }},
+      "depends_on": [],
+      "save_as": "schema_info"
+    }}
+  ],
+  "manipulation": {{
+    "required": false,
+    "type": null
+  }},
+  "base_params": {{}},
+  "tool": "get_schema_info"
+}}
+
+For data queries (standard or comparison):
 {{
   "query_type": "standard" or "comparison",
   "steps": [
@@ -154,6 +218,19 @@ Extract filter conditions from the query. Return ONLY a valid JSON object with t
   ]
 }}
 
+CRITICAL RULE: DO NOT create filters for date-related fields (order_date, created_at, etc.)
+Date filtering is already handled by the API call parameters (start_date/end_date).
+Only extract filters for non-date fields like:
+- sku
+- payment_mode
+- marketplace
+- order_status
+- state
+- city
+- customer_name
+- customer_email
+- etc.
+
 Operators:
 - eq: equals
 - ne: not equals
@@ -161,12 +238,17 @@ Operators:
 - contains: string contains
 - in: value in list
 
-Important: Use the EXACT field names and values from the schema above. Pay attention to capitalization and enum values.
+Important: Use the EXACT field names and values from the schema above. Pay attention to capitalization and enum values. And, for SKU related queries: An sku 10510-455-7 means, sku 10510-455 of size 7. Hence, if size not mentioned in the sku, use "contains" operator on the sku field always.
 
 Examples:
 - "prepaid orders" → {{"field": "payment_mode", "operator": "eq", "value": "PrePaid"}}
 - "open status" → {{"field": "order_status", "operator": "eq", "value": "Open"}}
 - "from Karnataka" → {{"field": "state", "operator": "eq", "value": "Karnataka"}}
+- "sku 12345" → {{"field": "sku", "operator": "eq", "value": "12345"}}
+
+DO NOT INCLUDE:
+- order_date filters (already handled by API)
+- Any temporal filters (dates, times, etc.)
 
 Return ONLY the JSON, no other text."""
 
@@ -276,10 +358,9 @@ Detailed Metrics by Group:
 Generate a comprehensive, natural language analysis of this comparison. 
 
 IMPORTANT: Format your response as numbered points ONLY. Each point should be on a new line.
-Use this exact format:
+Strictly use this exact format:
 Point 1: [First insight with specific numbers and percentages]
-Point 2: [Second insight with specific numbers and percentages]
-Point 3: [Third insight...]
+Point 2: [Second insight...]
 ...and so on.
 
 The comparison data may be either:
