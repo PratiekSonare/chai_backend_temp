@@ -53,10 +53,21 @@ class PlanningLLM(OpenRouterLLM):
     
     def invoke(self, query: str) -> dict:
         """Generate execution plan from query"""
+        from datetime import datetime, timedelta
         current_date = datetime.now().strftime("%Y-%m-%d")
+        
+        # Calculate some date examples for the LLM
+        today = datetime.now()
+        yesterday = today - timedelta(days=1)
+        five_days_ago = today - timedelta(days=5)
         
         prompt = f"""You are a query planning assistant for an e-commerce order management system.
 Today's date is {current_date}.
+
+CRITICAL: When generating dates in JSON responses, always use actual date values in YYYY-MM-DD HH:MM:SS format.
+- For "last 5 days": Calculate actual dates like "{five_days_ago.strftime('%Y-%m-%d %H:%M:%S')}" to "{today.strftime('%Y-%m-%d')} 23:59:59"
+- For "yesterday": Use actual yesterday date like "{yesterday.strftime('%Y-%m-%d')} 00:00:00" to "{yesterday.strftime('%Y-%m-%d')} 23:59:59"
+- NEVER use placeholder text like 'YYYY-MM-DD HH:MM:SS' - always calculate real dates
 
 User Query: "{query}"
 
@@ -65,11 +76,37 @@ Available Tools:
 2. get_schema_info - Get schema/metadata about available fields and constraints
    - Optional param "field": Specify a field name (e.g., "payment_mode") to get only that field's info
    - Without "field": Returns complete schema for all fields
+3. convert_to_df - Convert fetched JSON data to pandas DataFrame (REQUIRED before any metric calculation)
+4. METRIC TOOLS (use after convert_to_df):
+   - get_aov - Calculate Average Order Value
+   - get_total_revenue - Calculate total revenue 
+   - get_order_count - Get total number of orders
+   - get_order_status_distribution - Distribution of order statuses
+   - get_payment_mode_distribution - Distribution of payment modes (COD vs PrePaid)
+   - get_marketplace_distribution - Distribution by marketplace
+   - get_state_wise_distribution - Distribution by state
+   - get_city_wise_distribution - Distribution by city (top N)
+   - get_courier_distribution - Distribution by courier service
+   - get_average_discount - Average discount amount
+   - get_average_shipping_charge - Average shipping charges
+   - get_average_tax - Average tax amount
+5. STATISTICAL TOOLS:
+   - get_statistical_summary - Comprehensive stats (mean, median, std, quartiles) for numeric field
+   - get_percentile - Get specific percentile for a field
+   - get_top_percentile - Get top N% records and their metrics
+   - get_bottom_percentile - Get bottom N% records and their metrics
+   - get_correlation_matrix - Calculate correlation between numeric fields
+6. BUSINESS INTELLIGENCE TOOLS:
+   - get_conversion_rate - Calculate delivery success rate
+   - get_cod_vs_prepaid_metrics - Compare COD vs PrePaid performance
+   - get_geographic_insights - Get geographic distribution insights
+   - get_common_metrics - Calculate standard business metrics when no specific metrics are requested
 
 Your task is to create an execution plan in JSON format. Analyze the query and determine:
 1. Query Type:
    - "schema_discovery": If asking about available fields, data structure, allowed values, date ranges, etc.
    - "comparison": If comparing two or more groups (marketplaces, payment modes, states, etc.)
+   - "metric_analysis": If asking for specific metrics like AOV, revenue, distributions, statistical analysis
    - "standard": Regular data fetch with optional filtering
 
 2. Tool Selection:
@@ -77,12 +114,64 @@ Your task is to create an execution plan in JSON format. Analyze the query and d
      * If asking about a SPECIFIC field (e.g., "what are allowed values for payment_mode"), include "field" parameter
      * If asking generally (e.g., "what fields are available"), omit "field" parameter
    - Use "get_all_orders" for actual data queries
+   - ALWAYS use "convert_to_df" after getting data and before any metric calculations
+   - Use appropriate metric/statistical tools based on the query
 
 3. Extract date range (for data queries only - convert relative dates like "last 5 days" to absolute dates)
 
 4. Determine if filtering/manipulation is needed after fetching data
 
+IMPORTANT WORKFLOW FOR METRIC QUERIES:
+1. get_all_orders (with date range)
+2. convert_to_df (convert to DataFrame) 
+3. Apply filtering if needed
+4. Use appropriate metric tools
+
 Return ONLY a valid JSON object with this structure:
+
+For metric analysis queries:
+{{
+  "query_type": "metric_analysis",
+  "steps": [
+    {{
+      "id": "step1",
+      "tool": "get_all_orders",
+      "params": {{
+        "start_date": "YYYY-MM-DD HH:MM:SS",
+        "end_date": "YYYY-MM-DD HH:MM:SS"
+      }},
+      "depends_on": [],
+      "save_as": "orders_data"
+    }},
+    {{
+      "id": "step2",
+      "tool": "convert_to_df",
+      "params": {{
+        "raw": "{{orders_data}}"
+      }},
+      "depends_on": ["step1"],
+      "save_as": "orders_df"
+    }},
+    {{
+      "id": "step3",
+      "tool": "get_aov",
+      "params": {{
+        "table": "{{orders_df}}"
+      }},
+      "depends_on": ["step2"],
+      "save_as": "aov_result"
+    }}
+  ],
+  "manipulation": {{
+    "required": false,
+    "type": null
+  }},
+  "base_params": {{
+    "start_date": "YYYY-MM-DD HH:MM:SS",
+    "end_date": "YYYY-MM-DD HH:MM:SS"
+  }},
+  "tool": "get_all_orders"
+}}
 
 For schema discovery queries (specific field):
 {{
@@ -156,9 +245,12 @@ For data queries (standard or comparison):
 }}
 
 Examples:
-- "last 5 days" = start_date: 5 days ago at 00:00:00, end_date: today at 23:59:59
-- "last week" = start_date: 7 days ago, end_date: today
-- "yesterday" = start_date: yesterday 00:00:00, end_date: yesterday 23:59:59
+- "last 5 days" = start_date: "2026-02-12 00:00:00", end_date: "2026-02-17 23:59:59"
+- "last week" = start_date: "2026-02-10 00:00:00", end_date: "2026-02-17 23:59:59"
+- "yesterday" = start_date: "2026-02-16 00:00:00", end_date: "2026-02-16 23:59:59"
+- "today" = start_date: "2026-02-17 00:00:00", end_date: "2026-02-17 23:59:59"
+
+IMPORTANT: Always use actual dates in YYYY-MM-DD HH:MM:SS format, never use placeholder text like 'YYYY-MM-DD HH:MM:SS'.
 
 Return ONLY the JSON, no other text."""
 
@@ -336,6 +428,52 @@ Return ONLY the JSON, no other text."""
             return {"groups": []}
 
 
+class MetricLLM(OpenRouterLLM):
+    """Metric analysis LLM - generates insights from calculated metrics"""
+    
+    def invoke(self, params: dict) -> dict:
+        """Generate metric analysis and insights"""
+        query = params.get("query", "")
+        metrics = params.get("metrics", {})
+        raw_data_summary = params.get("data_summary", "")
+        
+        prompt = f"""You are a data analyst for an e-commerce order management system.
+
+User Query: "{query}"
+
+Calculated Metrics:
+{json.dumps(metrics, indent=2)}
+
+Data Summary:
+{raw_data_summary}
+
+Analyze the provided metrics and generate comprehensive insights. Your response should include:
+
+1. **Key Performance Indicators**: Highlight the most important metrics and their significance
+2. **Trends and Patterns**: Identify notable trends in the data
+3. **Comparative Analysis**: Compare different segments (payment modes, marketplaces, regions) if applicable
+4. **Statistical Insights**: Interpret percentiles, distributions, and correlations
+5. **Business Recommendations**: Provide actionable insights based on the data
+6. **Anomalies or Noteworthy Findings**: Point out any unusual patterns or outliers
+
+Structure your response with clear headings and bullet points. Use specific numbers and percentages from the metrics.
+
+If the metrics include distributions, highlight the top performers and underperformers.
+If statistical summaries are provided, explain what the quartiles and standard deviation indicate.
+If geographic data is available, provide location-based insights.
+If conversion rates are included, comment on business performance.
+
+Be concise but comprehensive. Focus on actionable insights that would help business decision-making.
+"""
+
+        response = self._call_api([{"role": "user", "content": prompt}], temperature=0.5)
+        
+        return {
+            "analysis": response.strip(),
+            "metrics_used": list(metrics.keys()) if isinstance(metrics, dict) else []
+        }
+
+
 class InsightLLM(OpenRouterLLM):
     """Insight generation LLM - creates natural language summaries"""
     
@@ -390,3 +528,4 @@ planning_llm = PlanningLLM()
 filtering_llm = FilteringLLM()
 grouping_llm = GroupingLLM()
 insight_llm = InsightLLM()
+metric_llm = MetricLLM()

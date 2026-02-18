@@ -5,7 +5,9 @@ import os
 import requests
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
-
+import pandas as pd
+import numpy as np
+import json
 
 def get_all_orders(start_date: str, end_date: str) -> List[Dict]:
     """
@@ -65,6 +67,499 @@ def get_all_orders(start_date: str, end_date: str) -> List[Dict]:
         all_orders = _fetch_orders_window(start_date, end_date, api_key, jwt_token, base_url)
     
     return all_orders
+
+#for any metric, data calculation, first convert to dataframe and then continue.
+def convert_to_df(raw: list) -> pd.DataFrame:
+    """Convert raw JSON order data to normalized DataFrame"""
+    
+    #raw = PYTHON LIST
+
+    orders = []
+    try:
+        # If raw is a JSON string, parse it first
+        if isinstance(raw, str):
+            parsed = json.loads(raw)
+        else:
+            parsed = raw
+
+        # If parsed is a dict and contains top-level 'data'
+        if isinstance(parsed, dict) and 'data' in parsed:
+            data_block = parsed.get('data')
+
+            # Common API shape: {'data': {'orders': [...]}}
+            if isinstance(data_block, dict) and 'orders' in data_block:
+                orders = data_block.get('orders') or []
+            # Sometimes 'data' itself is the list of orders
+            elif isinstance(data_block, list):
+                orders = data_block
+            # If 'data' is a single order dict, wrap it
+            elif isinstance(data_block, dict):
+                orders = [data_block]
+            else:
+                orders = []
+
+        # If parsed is a dict with 'orders' key at top-level
+        elif isinstance(parsed, dict) and 'orders' in parsed:
+            orders = parsed.get('orders') or []
+
+        # If parsed is already a list of orders
+        elif isinstance(parsed, list):
+            orders = parsed
+
+        # If parsed is a single order dict, wrap into list
+        elif isinstance(parsed, dict):
+            orders = [parsed]
+
+        else:
+            raise ValueError(f"Unsupported raw data type: {type(raw)}. Expected JSON string, dict, or list of orders.")
+
+    except Exception as e:
+        print(f"Error parsing raw input in convert_to_df: {e}")
+        raise
+
+    # Ensure orders is a list
+    if orders is None:
+        orders = []
+
+    df = pd.json_normalize(orders)
+
+    print("========================")
+    print("normalized dataframe: ")
+    print(df.head(5), flush=True)
+    df.to_csv("normalized_db.csv", index=False)
+    print("========================")
+
+    return df
+
+
+def get_aov(table: pd.DataFrame) -> float:
+    """Calculate Average Order Value from orders DataFrame"""
+
+    print("----------------", flush=True)
+    print("table in get_aov:", flush=True)
+    print(table.head(10), flush=True)
+    print("----------------", flush=True)
+
+    try:
+        if table.empty:
+            return 0.0
+        aov = table['total_amount'].astype(float).mean()
+        return round(aov, 2) if not pd.isna(aov) else 0.0
+    except Exception as e:
+        print(f"Error in calculating AOV: {e}")
+        return None
+
+
+def get_total_revenue(table: pd.DataFrame) -> float:
+    """Calculate total revenue from orders DataFrame"""
+    try:
+        if table.empty:
+            return 0.0
+        revenue = table['total_amount'].astype(float).sum()
+        return round(revenue, 2) if not pd.isna(revenue) else 0.0
+    except Exception as e:
+        print(f"Error in calculating total revenue: {e}")
+        return None
+
+
+def get_order_count(table: pd.DataFrame) -> int:
+    """Get total number of orders"""
+    try:
+        return len(table)
+    except Exception as e:
+        print(f"Error in calculating order count: {e}")
+        return None
+
+
+def get_order_status_distribution(table: pd.DataFrame) -> dict:
+    """Get distribution of order statuses"""
+    try:
+        if table.empty or 'order_status' not in table.columns:
+            return {}
+        distribution = table['order_status'].value_counts().to_dict()
+        return distribution
+    except Exception as e:
+        print(f"Error in calculating order status distribution: {e}")
+        return None
+
+
+def get_payment_mode_distribution(table: pd.DataFrame) -> dict:
+    """Get distribution of payment modes"""
+    try:
+        if table.empty or 'payment_mode' not in table.columns:
+            return {}
+        distribution = table['payment_mode'].value_counts().to_dict()
+        return distribution
+    except Exception as e:
+        print(f"Error in calculating payment mode distribution: {e}")
+        return None
+
+
+def get_marketplace_distribution(table: pd.DataFrame) -> dict:
+    """Get distribution of orders by marketplace"""
+    try:
+        if table.empty or 'marketplace' not in table.columns:
+            return {}
+        distribution = table['marketplace'].value_counts().to_dict()
+        return distribution
+    except Exception as e:
+        print(f"Error in calculating marketplace distribution: {e}")
+        return None
+
+
+def get_state_wise_distribution(table: pd.DataFrame) -> dict:
+    """Get distribution of orders by state"""
+    try:
+        if table.empty or 'state' not in table.columns:
+            return {}
+        distribution = table['state'].value_counts().to_dict()
+        return distribution
+    except Exception as e:
+        print(f"Error in calculating state distribution: {e}")
+        return None
+
+
+def get_city_wise_distribution(table: pd.DataFrame, top_n: int = 10) -> dict:
+    """Get distribution of orders by city (top N cities)"""
+    try:
+        if table.empty or 'city' not in table.columns:
+            return {}
+        distribution = table['city'].value_counts().head(top_n).to_dict()
+        return distribution
+    except Exception as e:
+        print(f"Error in calculating city distribution: {e}")
+        return None
+
+
+def get_courier_distribution(table: pd.DataFrame) -> dict:
+    """Get distribution of orders by courier service"""
+    try:
+        if table.empty or 'courier' not in table.columns:
+            return {}
+        distribution = table['courier'].value_counts().to_dict()
+        return distribution
+    except Exception as e:
+        print(f"Error in calculating courier distribution: {e}")
+        return None
+
+
+def get_average_discount(table: pd.DataFrame) -> float:
+    """Calculate average discount amount"""
+    try:
+        if table.empty:
+            return 0.0
+        avg_discount = table['total_discount'].astype(float).mean()
+        return round(avg_discount, 2) if not pd.isna(avg_discount) else 0.0
+    except Exception as e:
+        print(f"Error in calculating average discount: {e}")
+        return None
+
+
+def get_average_shipping_charge(table: pd.DataFrame) -> float:
+    """Calculate average shipping charge"""
+    try:
+        if table.empty:
+            return 0.0
+        avg_shipping = table['total_shipping_charge'].astype(float).mean()
+        return round(avg_shipping, 2) if not pd.isna(avg_shipping) else 0.0
+    except Exception as e:
+        print(f"Error in calculating average shipping charge: {e}")
+        return None
+
+
+def get_average_tax(table: pd.DataFrame) -> float:
+    """Calculate average tax amount"""
+    try:
+        if table.empty:
+            return 0.0
+        avg_tax = table['total_tax'].astype(float).mean()
+        return round(avg_tax, 2) if not pd.isna(avg_tax) else 0.0
+    except Exception as e:
+        print(f"Error in calculating average tax: {e}")
+        return None
+
+
+# Statistical Tools
+def get_statistical_summary(table: pd.DataFrame, field: str) -> dict:
+    """Get comprehensive statistical summary for a numeric field"""
+    try:
+        if table.empty or field not in table.columns:
+            return {
+                'count': 0, 'mean': 0.0, 'median': 0.0, 'std': 0.0,
+                'min': 0.0, 'max': 0.0, 'q25': 0.0, 'q75': 0.0
+            }
+        
+        series = pd.to_numeric(table[field], errors='coerce')
+        clean_series = series.dropna()
+        
+        if len(clean_series) == 0:
+            return {
+                'count': 0, 'mean': 0.0, 'median': 0.0, 'std': 0.0,
+                'min': 0.0, 'max': 0.0, 'q25': 0.0, 'q75': 0.0
+            }
+        
+        stats = {
+            'count': len(clean_series),
+            'mean': round(clean_series.mean(), 2),
+            'median': round(clean_series.median(), 2),
+            'std': round(clean_series.std(), 2),
+            'min': round(clean_series.min(), 2),
+            'max': round(clean_series.max(), 2),
+            'q25': round(clean_series.quantile(0.25), 2),
+            'q75': round(clean_series.quantile(0.75), 2)
+        }
+        return stats
+    except Exception as e:
+        print(f"Error in calculating statistical summary for {field}: {e}")
+        return None
+
+
+def get_percentile(table: pd.DataFrame, field: str, percentile: float) -> float:
+    """Get specific percentile for a numeric field"""
+    try:
+        if table.empty or field not in table.columns:
+            return 0.0
+        
+        series = pd.to_numeric(table[field], errors='coerce')
+        clean_series = series.dropna()
+        
+        if len(clean_series) == 0:
+            return 0.0
+        
+        result = clean_series.quantile(percentile / 100)
+        return round(result, 2) if not pd.isna(result) else 0.0
+    except Exception as e:
+        print(f"Error in calculating {percentile}th percentile for {field}: {e}")
+        return None
+
+
+def get_top_percentile(table: pd.DataFrame, field: str, percentile: float = 95) -> dict:
+    """Get records in top percentile for a field"""
+    try:
+        if table.empty or field not in table.columns:
+            return {
+                'threshold': 0.0, 'count': 0, 'percentage': 0.0, 'total_value': 0.0
+            }
+        
+        series = pd.to_numeric(table[field], errors='coerce')
+        clean_series = series.dropna()
+        
+        if len(clean_series) == 0:
+            return {
+                'threshold': 0.0, 'count': 0, 'percentage': 0.0, 'total_value': 0.0
+            }
+        
+        threshold = clean_series.quantile(percentile / 100)
+        # Use boolean indexing safely
+        mask = series >= threshold
+        top_records = table[mask]
+        
+        if top_records.empty:
+            return {
+                'threshold': round(threshold, 2),
+                'count': 0,
+                'percentage': 0.0,
+                'total_value': 0.0
+            }
+        
+        return {
+            'threshold': round(threshold, 2),
+            'count': len(top_records),
+            'percentage': round(len(top_records) / len(table) * 100, 2),
+            'total_value': round(pd.to_numeric(top_records[field], errors='coerce').sum(), 2)
+        }
+    except Exception as e:
+        print(f"Error in calculating top {percentile}% for {field}: {e}")
+        return None
+
+
+def get_bottom_percentile(table: pd.DataFrame, field: str, percentile: float = 5) -> dict:
+    """Get records in bottom percentile for a field"""
+    try:
+        if table.empty or field not in table.columns:
+            return {
+                'threshold': 0.0, 'count': 0, 'percentage': 0.0, 'total_value': 0.0
+            }
+        
+        series = pd.to_numeric(table[field], errors='coerce')
+        clean_series = series.dropna()
+        
+        if len(clean_series) == 0:
+            return {
+                'threshold': 0.0, 'count': 0, 'percentage': 0.0, 'total_value': 0.0
+            }
+        
+        threshold = clean_series.quantile(percentile / 100)
+        # Use boolean indexing safely
+        mask = series <= threshold
+        bottom_records = table[mask]
+        
+        if bottom_records.empty:
+            return {
+                'threshold': round(threshold, 2),
+                'count': 0,
+                'percentage': 0.0,
+                'total_value': 0.0
+            }
+        
+        return {
+            'threshold': round(threshold, 2),
+            'count': len(bottom_records),
+            'percentage': round(len(bottom_records) / len(table) * 100, 2),
+            'total_value': round(pd.to_numeric(bottom_records[field], errors='coerce').sum(), 2)
+        }
+    except Exception as e:
+        print(f"Error in calculating bottom {percentile}% for {field}: {e}")
+        return None
+
+
+def get_correlation_matrix(table: pd.DataFrame, fields: list) -> dict:
+    """Calculate correlation matrix between numeric fields"""
+    try:
+        if table.empty or not fields:
+            return {}
+        
+        # Check if all fields exist in the DataFrame
+        available_fields = [field for field in fields if field in table.columns]
+        
+        if len(available_fields) < 2:
+            return {"error": "At least 2 valid numeric fields required for correlation"}
+        
+        numeric_data = table[available_fields].apply(pd.to_numeric, errors='coerce')
+        # Remove columns that are all NaN
+        numeric_data = numeric_data.dropna(axis=1, how='all')
+        
+        if numeric_data.empty or numeric_data.shape[1] < 2:
+            return {"error": "Insufficient numeric data for correlation calculation"}
+        
+        corr_matrix = numeric_data.corr().round(3)
+        return corr_matrix.to_dict()
+    except Exception as e:
+        print(f"Error in calculating correlation matrix: {e}")
+        return None
+
+
+def get_conversion_rate(table: pd.DataFrame, success_status: str = 'Delivered') -> float:
+    """Calculate order conversion rate based on successful deliveries"""
+    try:
+        if table.empty:
+            return 0.0
+        
+        total_orders = len(table)
+        if total_orders == 0:
+            return 0.0
+            
+        successful_orders = len(table[table['order_status'] == success_status])
+        conversion_rate = (successful_orders / total_orders) * 100
+        return round(conversion_rate, 2)
+    except Exception as e:
+        print(f"Error in calculating conversion rate: {e}")
+        return None
+
+
+def get_cod_vs_prepaid_metrics(table: pd.DataFrame) -> dict:
+    """Compare COD vs PrePaid payment methods"""
+    try:
+        if table.empty:
+            return {
+                'cod': {'count': 0, 'total_revenue': 0.0, 'avg_order_value': 0.0},
+                'prepaid': {'count': 0, 'total_revenue': 0.0, 'avg_order_value': 0.0}
+            }
+        
+        cod_orders = table[table['payment_mode'] == 'COD']
+        prepaid_orders = table[table['payment_mode'] == 'PrePaid']
+        
+        # Calculate COD metrics
+        if cod_orders.empty:
+            cod_revenue = 0.0
+            cod_aov = 0.0
+        else:
+            cod_revenue = cod_orders['total_amount'].astype(float).sum()
+            cod_aov = cod_orders['total_amount'].astype(float).mean()
+        
+        # Calculate PrepPaid metrics
+        if prepaid_orders.empty:
+            prepaid_revenue = 0.0
+            prepaid_aov = 0.0
+        else:
+            prepaid_revenue = prepaid_orders['total_amount'].astype(float).sum()
+            prepaid_aov = prepaid_orders['total_amount'].astype(float).mean()
+        
+        metrics = {
+            'cod': {
+                'count': len(cod_orders),
+                'total_revenue': round(cod_revenue, 2),
+                'avg_order_value': round(cod_aov, 2) if not pd.isna(cod_aov) else 0.0
+            },
+            'prepaid': {
+                'count': len(prepaid_orders),
+                'total_revenue': round(prepaid_revenue, 2),
+                'avg_order_value': round(prepaid_aov, 2) if not pd.isna(prepaid_aov) else 0.0
+            }
+        }
+        return metrics
+    except Exception as e:
+        print(f"Error in calculating COD vs PrePaid metrics: {e}")
+        return None
+
+
+def get_common_metrics(data) -> dict:
+    """Calculate common business metrics from order data"""
+    try:
+        # Convert data to DataFrame if needed
+        if isinstance(data, list) and len(data) > 0:
+            df_data = {"data": data}
+            df_json = json.dumps(df_data)
+            df = convert_to_df(df_json)
+        elif isinstance(data, pd.DataFrame):
+            if data.empty:
+                return {"error": "No valid data available for metric calculation"}
+            df = data
+        else:
+            return {"error": "No valid data available for metric calculation"}
+        
+        # Calculate standard metrics
+        metrics = {
+            "aov": get_aov(df),
+            "total_revenue": get_total_revenue(df),
+            "order_count": get_order_count(df),
+            "order_status_distribution": get_order_status_distribution(df),
+            "payment_mode_distribution": get_payment_mode_distribution(df),
+            "marketplace_distribution": get_marketplace_distribution(df),
+            "total_amount_stats": get_statistical_summary(df, "total_amount")
+        }
+        return metrics
+    except Exception as e:
+        print(f"Error in calculating common metrics: {e}")
+        return {"error": f"Failed to calculate metrics: {str(e)}"}
+
+
+def get_geographic_insights(table: pd.DataFrame, top_n: int = 5) -> dict:
+    """Get geographic distribution insights"""
+    try:
+        if table.empty or 'state' not in table.columns or 'city' not in table.columns:
+            return {
+                'top_states_by_orders': {}, 'top_states_by_revenue': {},
+                'top_cities_by_orders': {}, 'top_cities_by_revenue': {},
+                'highest_aov_states': {}, 'highest_aov_cities': {}
+            }
+        
+        state_revenue = table.groupby('state')['total_amount'].agg(['count', 'sum', 'mean']).round(2)
+        city_revenue = table.groupby('city')['total_amount'].agg(['count', 'sum', 'mean']).round(2)
+        
+        insights = {
+            'top_states_by_orders': state_revenue.nlargest(min(top_n, len(state_revenue)), 'count')['count'].to_dict() if state_revenue.empty == False else {},
+            'top_states_by_revenue': state_revenue.nlargest(min(top_n, len(state_revenue)), 'sum')['sum'].to_dict() if state_revenue.empty == False else {},
+            'top_cities_by_orders': city_revenue.nlargest(min(top_n, len(city_revenue)), 'count')['count'].to_dict() if city_revenue.empty == False else {},
+            'top_cities_by_revenue': city_revenue.nlargest(min(top_n, len(city_revenue)), 'sum')['sum'].to_dict() if city_revenue.empty == False else {},
+            'highest_aov_states': state_revenue.nlargest(min(top_n, len(state_revenue)), 'mean')['mean'].to_dict() if state_revenue.empty == False else {},
+            'highest_aov_cities': city_revenue.nlargest(min(top_n, len(city_revenue)), 'mean')['mean'].to_dict() if city_revenue.empty == False else {}
+        }
+        return insights
+    except Exception as e:
+        print(f"Error in calculating geographic insights: {e}")
+        return None
+
 
 
 def _fetch_orders_window(start_date: str, end_date: str, api_key: str, jwt_token: str, base_url: str) -> List[Dict]:
@@ -338,7 +833,37 @@ def get_schema_info(entity: str = "orders", field: str = None) -> Dict[str, Any]
             "state": {
                 "type": "string",
                 "description": "Delivery state/region",
-                "allowed_values": ["Karnataka", "Maharashtra", "Delhi", "Tamil Nadu", "Gujarat", "Uttar Pradesh", "West Bengal", "Rajasthan"],
+                "allowed_values": [
+                                    "Delhi", 
+                                    "Andhra Pradesh",
+                                    "Arunachal Pradesh",
+                                    "Assam",
+                                    "Bihar",
+                                    "Chhattisgarh",
+                                    "Goa",
+                                    "Gujarat",
+                                    "Haryana",
+                                    "Himachal Pradesh",
+                                    "Jharkhand",
+                                    "Karnataka",
+                                    "Kerala",
+                                    "Madhya Pradesh",
+                                    "Maharashtra",
+                                    "Manipur",
+                                    "Meghalaya",
+                                    "Mizoram",
+                                    "Nagaland",
+                                    "Odisha",
+                                    "Punjab",
+                                    "Rajasthan",
+                                    "Sikkim",
+                                    "Tamil Nadu",
+                                    "Telangana",
+                                    "Tripura",
+                                    "Uttarakhand",
+                                    "Uttar Pradesh",
+                                    "West Bengal"
+                                ],                                       
                 "example": "Karnataka",
                 "filterable": True,
                 "categorical": True,
@@ -440,4 +965,26 @@ def get_schema_info(entity: str = "orders", field: str = None) -> Dict[str, Any]
 TOOL_REGISTRY = {
     "get_all_orders": get_all_orders,
     "get_schema_info": get_schema_info,
+    "convert_to_df": convert_to_df,
+    "get_aov": get_aov,
+    "get_total_revenue": get_total_revenue,
+    "get_order_count": get_order_count,
+    "get_order_status_distribution": get_order_status_distribution,
+    "get_payment_mode_distribution": get_payment_mode_distribution,
+    "get_marketplace_distribution": get_marketplace_distribution,
+    "get_state_wise_distribution": get_state_wise_distribution,
+    "get_city_wise_distribution": get_city_wise_distribution,
+    "get_courier_distribution": get_courier_distribution,
+    "get_average_discount": get_average_discount,
+    "get_average_shipping_charge": get_average_shipping_charge,
+    "get_average_tax": get_average_tax,
+    "get_statistical_summary": get_statistical_summary,
+    "get_percentile": get_percentile,
+    "get_top_percentile": get_top_percentile,
+    "get_bottom_percentile": get_bottom_percentile,
+    "get_correlation_matrix": get_correlation_matrix,
+    "get_conversion_rate": get_conversion_rate,
+    "get_cod_vs_prepaid_metrics": get_cod_vs_prepaid_metrics,
+    "get_geographic_insights": get_geographic_insights,
+    "get_common_metrics": get_common_metrics,
 }

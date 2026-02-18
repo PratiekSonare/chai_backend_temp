@@ -1,10 +1,12 @@
 from typing import TypedDict, Annotated, Literal
 from langgraph.graph import StateGraph, END
 import operator
+import pandas as pd
+import json
 
 # Import tools and LLM providers
 from tools import TOOL_REGISTRY, apply_filters
-from llm_providers import planning_llm, filtering_llm, grouping_llm, insight_llm
+from llm_providers import planning_llm, filtering_llm, grouping_llm, insight_llm, metric_llm
 
 # State schema
 class AgentState(TypedDict):
@@ -26,6 +28,9 @@ class AgentState(TypedDict):
     aggregated_metrics: dict[str, dict] | None  # {group_id: metrics}
     comparison_results: dict | None
     insights: str | None
+    # Metric analysis fields
+    metric_results: dict | None  # Results from metric calculations
+    metric_analysis: str | None  # LLM analysis of metrics
 
 # Simple in-memory cache (use Redis for production)
 RESULT_CACHE = {}
@@ -41,8 +46,86 @@ def get_cached_result(key: str) -> dict | list:
 
 def extract_schema_with_enums(data: dict | list, sample_size: int = 100) -> dict:
     """Extract schema with categorical value examples for LLM understanding"""
+
+    print("==== Data ====")
+    print(data, flush=True)
+
+    # Handle pandas DataFrame
+    if hasattr(data, 'empty'):  # Check if it's a DataFrame-like object
+        if data.empty:
+            return {}
+        
+        # Convert DataFrame to schema format
+        sample = data.head(sample_size) if len(data) > sample_size else data
+        schema = {}
+        
+        for column in data.columns:
+            if column != 'pickup_address':
+                # Get unique values for categorical detection
+                unique_values = set()
+                try:
+                    unique_vals = sample[column].dropna().unique()
+                    for val in unique_vals:
+                        if val is not None:
+                            # Handle complex data types (lists, dicts) that can't be hashed
+                            try:
+                                # Try to convert to string for simple types
+                                if isinstance(val, (list, dict, tuple)):
+                                    # For complex types, use JSON representation
+                                    unique_values.add(json.dumps(val, sort_keys=True, default=str))
+                                else:
+                                    unique_values.add(str(val))
+                            except (TypeError, ValueError):
+                                # Fallback for any other unhashable types
+                                unique_values.add(str(type(val).__name__))
+                except Exception as e:
+                    # If unique() fails, just skip this column's enum detection
+                    print(f"Warning: Could not extract unique values for column '{column}': {e}")
+                    unique_values = set()
+            
+            # Sample value for example
+            sample_value = None
+            if not sample[column].empty:
+                non_null_values = sample[column].dropna()
+                if len(non_null_values) > 0:
+                    sample_value = non_null_values.iloc[0]
+                    # Convert complex types to JSON for display
+                    if isinstance(sample_value, (list, dict, tuple)):
+                        try:
+                            sample_value = json.dumps(sample_value, default=str)
+                        except:
+                            sample_value = str(sample_value)
+            
+            # If a certain column field is [object Object]
+            value_type = type(sample_value).__name__ if sample_value is not None else "object"
+
+            # If few unique values (< 20), treat as categorical
+            is_categorical = len(unique_values) < 20 and len(unique_values) > 0
+
+            schema[column] = {
+                "type": value_type,
+                "example": sample_value,
+                "is_categorical": is_categorical,
+                "enum": sorted(list(unique_values)) if is_categorical else None
+            }
+        
+        return schema
+    
+    # Handle empty data
     if not data:
         return {}
+    
+    # Handle scalar values (int, float, numpy scalars)
+    if isinstance(data, (int, float)) or hasattr(data, 'dtype'):
+        # Single scalar value - create a simple schema
+        return {
+            "value": {
+                "type": type(data).__name__,
+                "example": float(data) if hasattr(data, 'dtype') else data,
+                "is_categorical": False,
+                "enum": None
+            }
+        }
     
     # Handle list of records
     if isinstance(data, list):
@@ -103,6 +186,7 @@ def planning_node(state: AgentState) -> AgentState:
             }
         
         print(f"✅ [PLANNING] Plan created: {plan_response['plan'].get('query_type', 'unknown')} query", flush=True)
+        
         return {
             **state,
             "plan": plan_response["plan"],
@@ -120,7 +204,7 @@ def execute_tool_node(state: AgentState) -> AgentState:
     total_steps = len(state["plan"]["steps"]) if state["plan"] else 0
     print(f"🔧 [EXECUTE_TOOL] Step {step_idx + 1}/{total_steps} | Retry: {state.get('retry_count', 0)}", flush=True)
 
-    print(state, flush=True)
+    #print(state, flush=True)
 
     try:
         plan = state["plan"]
@@ -137,7 +221,12 @@ def execute_tool_node(state: AgentState) -> AgentState:
                     "error": f"Dependency {dep_step['save_as']} not found"
                 }
             # Retrieve actual data from cache for execution
-            resolved_params[dep_step["save_as"]] = get_cached_result(ref_key)
+            dep_data = get_cached_result(ref_key)
+            
+            # Replace placeholder values in params with actual dependency data
+            for param_key, param_value in resolved_params.items():
+                if isinstance(param_value, str) and param_value == f"{{{dep_step['save_as']}}}":
+                    resolved_params[param_key] = dep_data
         
         # Execute tool (map tool name to actual function)
         tool_function = TOOL_REGISTRY.get(step["tool"])
@@ -174,7 +263,7 @@ def execute_tool_node(state: AgentState) -> AgentState:
             "current_step_index": state["current_step_index"] + 1,
             "error": None,
             "retry_count": 0
-        } 
+        }
         
     except Exception as e:
         # Retry logic
@@ -262,6 +351,150 @@ def no_filter_node(state: AgentState) -> AgentState:
         "final_result_ref": ref_key,
         "error": None
     }
+
+def metric_processing_node(state: AgentState) -> AgentState:
+    """Execute metric calculations based on the plan"""
+    print(f"📊 [METRIC_PROCESSING] Executing metric calculations", flush=True)
+    
+    try:
+        # Get the final data after all tool executions
+        plan = state["plan"]
+        final_step = plan["steps"][-1]
+        
+        if state.get("final_result_ref"):
+            # Data already processed (filtered)
+            data_ref = state["final_result_ref"]
+        else:
+            # Use last step result
+            data_ref = state["tool_result_refs"][final_step["save_as"]]
+        
+        # Get the actual data
+        result_data = get_cached_result(data_ref)
+        
+        # Execute all metric calculations mentioned in the plan
+        metric_results = {}
+        
+        # Extract which metrics were requested based on the plan steps
+        metric_tools = [step for step in plan["steps"] if step["tool"].startswith("get_") and step["tool"] != "get_all_orders" and step["tool"] != "get_schema_info"]
+        
+        print("state[tool_result_refs]: ", state["tool_result_refs"])
+        print("metric_tools: ", metric_tools)
+
+        for metric_step in metric_tools:
+            tool_name = metric_step["tool"]
+            save_as = metric_step["save_as"]
+            print("tool_name: ", tool_name)
+            print("save_as: ", save_as)
+            if save_as in state["tool_result_refs"]:
+                # Result already calculated
+                metric_results[tool_name] = get_cached_result(state["tool_result_refs"][save_as])
+                print(f"Found cached metric result for {tool_name}: {metric_results[tool_name]}")
+        
+        print("==========>>>>> plan", flush=True)
+        print(state['plan'], flush=True)
+
+        # If no specific metrics in plan, calculate common metrics
+        if not metric_results:
+            # Use the common metrics tool
+            print("==========>>>>> calculating common metrics", flush=True)
+            metric_results = TOOL_REGISTRY["get_common_metrics"](result_data)
+        
+        # Cache metric results
+        if metric_results:
+            metric_ref = cache_result(metric_results, key="metric_results")
+            print(f"✅ [METRIC_PROCESSING] Calculated {len(metric_results)} metrics", flush=True)
+            
+            print("metric_results: ", metric_results)
+            print("metric_ref: ", metric_ref)
+
+            return {
+                **state,
+                "metric_results": metric_results,
+                "final_result_ref": metric_ref,  # Update final result to metrics
+                "error": None
+            }
+        else:
+            return {
+                **state,
+                "error": "No metrics could be calculated from the data"
+            }
+        
+    except Exception as e:
+        print(f"❌ [METRIC_PROCESSING] Error: {str(e)}", flush=True)
+        return {**state, "error": f"Metric processing error: {str(e)}"}
+
+def metric_analysis_node(state: AgentState) -> AgentState:
+    """Generate insights from calculated metrics using MetricLLM"""
+    print(f"🧠 [METRIC_ANALYSIS] Generating metric insights", flush=True)
+    
+    try:
+        metrics = state.get("metric_results", {})
+        print("===================", flush=True)
+        print(metrics, flush=True)
+        if not metrics:
+            return {**state, "error": "No metrics available for analysis"}
+        
+        # Check if metrics contain errors
+        if isinstance(metrics, dict) and "error" in metrics:
+            return {**state, "error": f"Metric calculation failed: {metrics['error']}"}
+        
+        # Ensure we have valid metrics to analyze
+        if not isinstance(metrics, dict) or len(metrics) == 0:
+            return {**state, "error": "Invalid or empty metrics data"}
+        
+        # Prepare data summary
+        data_summary = ""
+        if state.get("final_result_ref"):
+            # Try to get raw data count for context
+            try:
+                raw_data = get_cached_result(state["final_result_ref"])
+                if isinstance(raw_data, dict) and "aov" in raw_data:
+                    # This is already metric data
+                    data_summary = f"Analyzed metrics from processed order data"
+                elif isinstance(raw_data, list) and len(raw_data) > 0:
+                    data_summary = f"Analyzed {len(raw_data)} order records"
+                elif isinstance(raw_data, pd.DataFrame) and not raw_data.empty:
+                    data_summary = f"Analyzed {len(raw_data)} order records"
+                elif isinstance(raw_data, dict) and "metrics" in raw_data:
+                    data_summary = f"Analyzed calculated metrics"
+                else:
+                    data_summary = "Analyzed order data"
+            except Exception as e:
+                print(f"[DEBUG] Error getting data summary: {e}")
+                data_summary = "Analyzed order data"
+        
+        # Call MetricLLM for analysis
+        analysis_response = metric_llm.invoke({
+            "query": state["user_query"],
+            "metrics": metrics,
+            "data_summary": data_summary
+        })
+        
+        analysis_text = analysis_response.get("analysis", "Analysis not available")
+        
+        # Create final result combining metrics and analysis
+        final_result = {
+            "query": state["user_query"],
+            "metrics": metrics,
+            "analysis": analysis_text,
+            "metrics_calculated": analysis_response.get("metrics_used", [])
+        }
+        
+        # Cache the final analyzed result
+        final_ref = cache_result(final_result, key="final_metric_analysis")
+        
+        print(f"✅ [METRIC_ANALYSIS] Generated insights for {len(metrics)} metrics", flush=True)
+        
+        return {
+            **state,
+            "metric_analysis": analysis_text,
+            "final_result_ref": final_ref,
+            "error": None
+        }
+        
+    except Exception as e:
+        print(f"❌ [METRIC_ANALYSIS] Error: {str(e)}", flush=True)
+        return {**state, "error": f"Metric analysis error: {str(e)}"}
 
 def grouping_node(state: AgentState) -> AgentState:
     """Identify comparison groups and create parallel execution branches"""
@@ -575,7 +808,7 @@ def should_continue_execution(state: AgentState) -> Literal["execute_tool", "che
     
     return "check_manipulation"
 
-def needs_manipulation(state: AgentState) -> Literal["filtering", "no_filter", "error"]:
+def needs_manipulation(state: AgentState) -> Literal["filtering", "no_filter", "metric_processing", "error"]:
     """Check if filtering/manipulation is required"""
     if state["error"]:
         return "error"
@@ -583,6 +816,10 @@ def needs_manipulation(state: AgentState) -> Literal["filtering", "no_filter", "
     # Schema discovery queries never need filtering
     if state["plan"].get("query_type") == "schema_discovery":
         return "no_filter"
+    
+    # Metric analysis queries go directly to metric processing
+    if state["plan"].get("query_type") == "metric_analysis":
+        return "metric_processing"
     
     if state["plan"]["manipulation"]["required"]:
         return "filtering"
@@ -605,9 +842,9 @@ def is_comparison_query(state: AgentState) -> Literal["grouping", "execute_tool"
     
     query_type = state["plan"].get("query_type")
     
-    # Schema discovery queries go through standard execute_tool flow
-    # They just return schema info instead of data
-    if query_type == "schema_discovery":
+    # Schema discovery and metric analysis queries go through standard execute_tool flow
+    # They just return schema info or processed metrics instead of data
+    if query_type in ["schema_discovery", "metric_analysis"]:
         return "execute_tool"
     
     if query_type == "comparison":
@@ -637,6 +874,10 @@ workflow.add_node("execute_tool", execute_tool_node)
 workflow.add_node("filtering", filtering_node)
 workflow.add_node("apply_filters", apply_filters_node)
 workflow.add_node("no_filter", no_filter_node)
+
+# Add nodes - Metric analysis flow
+workflow.add_node("metric_processing", metric_processing_node)
+workflow.add_node("metric_analysis", metric_analysis_node)
 
 # Add nodes - Comparison flow
 workflow.add_node("grouping", grouping_node)
@@ -677,7 +918,8 @@ workflow.add_conditional_edges(
     needs_manipulation,
     {
         "filtering": "filtering",
-        "no_filter": "no_filter",
+        "no_filter": "no_filter", 
+        "metric_processing": "metric_processing",
         "error": "error_handler"
     }
 )
@@ -685,6 +927,10 @@ workflow.add_conditional_edges(
 workflow.add_edge("filtering", "apply_filters")
 workflow.add_edge("apply_filters", END)
 workflow.add_edge("no_filter", END)
+
+# Metric analysis flow
+workflow.add_edge("metric_processing", "metric_analysis")
+workflow.add_edge("metric_analysis", END)
 
 # Comparison flow
 workflow.add_edge("grouping", "parallel_fetch")
@@ -735,7 +981,9 @@ if __name__ == '__main__':
         current_group_index=0,
         aggregated_metrics=None,
         comparison_results=None,
-        insights=None
+        insights=None,
+        metric_results=None,
+        metric_analysis=None
     )
 
     # Example 2: Comparison query
@@ -756,7 +1004,32 @@ if __name__ == '__main__':
         current_group_index=0,
         aggregated_metrics=None,
         comparison_results=None,
-        insights=None
+        insights=None,
+        metric_results=None,
+        metric_analysis=None
+    )
+
+    # Example 3: Metric analysis query
+    initial_state_metric = AgentState(
+        user_query="What is the average order value and revenue from last 7 days?",
+        plan=None,
+        tool_result_refs={},
+        tool_result_schemas={},
+        current_step_index=0,
+        filters=None,
+        final_result_ref=None,
+        error=None,
+        retry_count=0,
+        comparison_mode=False,
+        comparison_groups=None,
+        group_results=None,
+        group_schemas=None,
+        current_group_index=0,
+        aggregated_metrics=None,
+        comparison_results=None,
+        insights=None,
+        metric_results=None,
+        metric_analysis=None
     )
 
     # Run standard query
@@ -780,3 +1053,18 @@ if __name__ == '__main__':
         print(f"\nComparison Data: {final_data['comparison_data']}")
     else:
         print(f"Error: {result_comparison['error']}")
+
+    # Run metric analysis query
+    print(f"\n{'='*50}")
+    print("METRIC ANALYSIS EXAMPLE")
+    print(f"{'='*50}")
+    
+    result_metric = app.invoke(initial_state_metric)
+
+    if result_metric["final_result_ref"]:
+        final_data = get_cached_result(result_metric["final_result_ref"])
+        print(f"\nQuery: {final_data['query']}")
+        print(f"\nMetrics: {final_data['metrics']}")
+        print(f"\nAnalysis:\n{final_data['analysis']}")
+    else:
+        print(f"Error: {result_metric['error']}")

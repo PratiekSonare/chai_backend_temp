@@ -7,11 +7,13 @@ Examples:
 - What are the allowed enum values for order_status?
 - Do we have region-wise data or only country-level?
 
+====== NA ======
 B. Cross-Field Logical Conditions
 Examples:
 - Orders where revenue > 10k AND discount < 5%
-- Products that sold well in Q1 but poorly in Q2
+- Products that sold well in Q1 but poorly in Q2            
 - Customers who bought A but not B
+======    ======
 
 C. Temporal Reasoning & Time Windows
 Examples:
