@@ -456,14 +456,20 @@ Analyze the provided metrics and generate comprehensive insights. Your response 
 5. **Business Recommendations**: Provide actionable insights based on the data
 6. **Anomalies or Noteworthy Findings**: Point out any unusual patterns or outliers
 
-Structure your response with clear headings and bullet points. Use specific numbers and percentages from the metrics.
+Use specific numbers and percentages from the metrics. All values in INR.
 
 If the metrics include distributions, highlight the top performers and underperformers.
 If statistical summaries are provided, explain what the quartiles and standard deviation indicate.
 If geographic data is available, provide location-based insights.
 If conversion rates are included, comment on business performance.
 
-Be concise but comprehensive. Focus on actionable insights that would help business decision-making.
+IMPORTANT: Format your response in an unordered-list using HTML. Add <strong> tag wherever necessary. Each point should be a new list-item in this unordered-list output.
+Strictly use this exact format:
+<ul>
+  <li>[point 1.]</li>
+  <li>[point 2.]</li>
+  ...and so on.
+</ul> 
 """
 
         response = self._call_api([{"role": "user", "content": prompt}], temperature=0.5)
@@ -495,11 +501,13 @@ Detailed Metrics by Group:
 
 Generate a comprehensive, natural language analysis of this comparison. 
 
-IMPORTANT: Format your response as numbered points ONLY. Each point should be on a new line.
+IMPORTANT: Format your response in HTML. Each point should be a new list-item in this unordered-list output.
 Strictly use this exact format:
-Point 1: [First insight with specific numbers and percentages]
-Point 2: [Second insight...]
-...and so on.
+<ul>
+  <li>[point 1.]</li>
+  <li>[point 2.]</li>
+  ...and so on.
+</ul> 
 
 The comparison data may be either:
 - "pairwise" (2 groups): Direct A vs B comparison with specific differences and percentages

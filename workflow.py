@@ -792,7 +792,6 @@ def insight_generation_node(state: AgentState) -> AgentState:
         print(f"❌ [INSIGHTS] Error: {str(e)}", flush=True)
         return {**state, "error": f"Insight generation error: {str(e)}"}
 
-
 # Conditional edges
 def should_continue_execution(state: AgentState) -> Literal["execute_tool", "check_manipulation", "error"]:
     """Check if more tools need execution"""
