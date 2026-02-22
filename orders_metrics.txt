@@ -1,0 +1,204 @@
+schema of single data point:
+    {
+            "Package Height": 11,
+            "Package Length": 30,
+            "Package Weight": 400,
+            "Package Width": 11,
+            "address_line_1": null,
+            "address_line_2": null,
+            "available_after": "2026-02-17 08:53:42",
+            "awb_number": null,
+            "batch_created_at": null,
+            "batch_id": null,
+            "billing_address_1": null,
+            "billing_address_2": null,
+            "billing_city": null,
+            "billing_country": null,
+            "billing_mobile": null,
+            "billing_name": null,
+            "billing_pin_code": "500097",
+            "billing_state": "Telangana",
+            "billing_state_code": "36",
+            "blockSplit": 0,
+            "buyer_gst": "NA",
+            "carrier_id": 4432,
+            "checkout_id": null,
+            "city": "Hyderabad",
+            "collectable_amount": "0.0000",
+            "company_name": "Easy Spirit Enterprises Private Limited",
+            "contact_num": null,
+            "country": "India",
+            "courier": "myntra",
+            "courier_aggregator_name": null,
+            "customer_code": "NA",
+            "customer_name": null,
+            "delivery_date": null,
+            "discount_code": null,
+            "documents": null,
+            "email": null,
+            "fulfillable_status": 0,
+            "import_date": "2026-02-17 08:53:44",
+            "import_warehouse_id": 228781,
+            "import_warehouse_name": "Easy Spirit Enterprises Private Limited",
+            "invoice_currency_code": "INR",
+            "invoice_date": "2026-02-17 00:00:00",
+            "invoice_id": 562105511,
+            "invoice_number": null,
+            "last_update_date": "2026-02-17 09:09:34",
+            "latitude": null,
+            "location_key": "ne52340745961",
+            "longitude": null,
+            "manifest_date": null,
+            "manifest_no": null,
+            "marketplace": "Myntra PPMP",
+            "marketplace_id": 233,
+            "marketplace_invoice_num": null,
+            "message": null,
+            "meta": {
+                "cancellation_reason": null,
+                "weight": ""
+            },
+            "order_date": "2026-02-17 08:53:40",
+            "order_id": 472363767,
+            "order_priority": 0,
+            "order_quantity": 1,
+            "order_status": "Cancelled",
+            "order_status_id": 9,
+            "order_type": "B2C",
+            "order_type_key": "retailorder",
+            "originalOrderId": null,
+            "packing_material": [],
+            "payment_gateway_name": null,
+            "payment_gateway_transaction_number": null,
+            "payment_mode": "COD",
+            "payment_mode_id": 2,
+            "pickup_address": "Omviras Integrated Logistics Pvt. Ltd Richland Commercial Hub | H. No. 580, D6 AGala: 2-C, Mumbai -Nahsik Highway, Vadpe Village, Bhiwandi, Thane, Maharashtra",
+            "pickup_city": "Bhiwandi",
+            "pickup_country": "India",
+            "pickup_pin_code": "421302",
+            "pickup_state": "Maharashtra",
+            "pickup_state_code": "27",
+            "pin_code": "500097",
+            "qcPassed": 1,
+            "queue_message": null,
+            "queue_status": 8,
+            "reference_code": "5a0c38d2-7ed7-4cc8-b01a-ee1381d65127",
+            "replacement_order": 0,
+            "salesmanUserId": 0,
+            "seller_gst": "27AAECE6623Q1Z4",
+            "shipping_history": null,
+            "shipping_last_update_date": null,
+            "shipping_status": null,
+            "shipping_status_id": null,
+            "state": "Telangana",
+            "state_code": "36",
+            "suborder_count": "NA",
+            "suborders": [
+                {
+                    "AccountingSku": "11200-850-9",
+                    "Identifier": "11200-850-9",
+                    "accounting_unit": "PRS",
+                    "batch_codes": [],
+                    "batchcode_expiry": "NA",
+                    "batchcode_serial": "NA",
+                    "brand": "chupps",
+                    "cancelled_quantity": 1,
+                    "category": "Slider & Flip Flops",
+                    "company_product_id": 173381573,
+                    "cost": 180,
+                    "description": null,
+                    "ean": "8905803071351",
+                    "height": 11,
+                    "item_quantity": 1,
+                    "item_status": "Cancelled",
+                    "length": 30,
+                    "marketplace_sku": "11200-850-9",
+                    "meta": {
+                        "serialRequired": true
+                    },
+                    "model_no": "CHUPSTER",
+                    "mrp": 1299,
+                    "productName": "11200-850-CHUPSTER-VOID BLACK",
+                    "product_id": 33003811,
+                    "product_tax_code": "64022090",
+                    "reference_code": "5a0c38d2-7ed7-4cc8-b01a-ee1381d65127",
+                    "returned_quantity": 0,
+                    "scheme_applied": 0,
+                    "selling_price": "601",
+                    "serial_nums": "NA",
+                    "shipment_type": "MarketplaceShipped",
+                    "shipped_quantity": 0,
+                    "size": "9",
+                    "sku": "11200-850-9",
+                    "sku_type": "Normal",
+                    "sub_product_count": 1,
+                    "suborder_history": {
+                        "confirm_datetime": null,
+                        "hold_datetime": null,
+                        "inventory_assigned_datetime": "2026-02-17 08:53:44",
+                        "manifest_datetime": null,
+                        "print_datetime": null,
+                        "qc_pass_datetime": "2026-02-17 08:53:44",
+                        "unhold_datetime": null
+                    },
+                    "suborder_id": 746579973,
+                    "suborder_num": "10980846526",
+                    "suborder_quantity": 1,
+                    "suborder_reference_num": "10980846526",
+                    "tagloop_required": true,
+                    "tax": 28.6191,
+                    "tax_rate": 5,
+                    "tax_type": "GST",
+                    "total_miscellaneous": "0.0000",
+                    "total_shipping_charge": "0.0000",
+                    "weight": 400,
+                    "width": 11
+                }
+            ],
+            "tat": "2026-02-17 12:00:00",
+            "tcs_amount": 0,
+            "tcs_rate": 0,
+            "total_amount": "601.0001",
+            "total_discount": "0.0000",
+            "total_shipping_charge": "0.0000",
+            "total_tax": "28.6191",
+            "warehouseId": 228781
+        }
+
+need you to develop this api call to return the following metrics in app.py (/orders/metrics) that i will call with the input data. convert the incoming data to pd for simplicity.:
+    
+    Volume Metrics
+        - Total Orders
+            - Total SKUs sold
+            - Net SKUs sold
+        - Unique SKUs ordered
+            - State-wise order count
+
+    Revenue Metrics
+        - Gross Revenue
+        - Gross Margin
+        - AOV
+        - ASP
+
+    Payment Metrics
+        - COD v/s PrePaid
+
+    Cancellation Metrics
+        - RTO Rate
+        - Cancellation Rate
+        - Highest state RTO
+
+    Time-based Metrics
+        - Day-wise Frequency
+        - 7-Day Moving Average
+        - Inventory Assignment Time
+        - QC Time
+        - Order Processing Time
+
+    Geographic Metrics
+        - State-wise Order Count
+        - Revenue by State
+        - Cancellation by State
+
+    Product Metrics
+        - Top SKUs

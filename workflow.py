@@ -47,9 +47,6 @@ def get_cached_result(key: str) -> dict | list:
 def extract_schema_with_enums(data: dict | list, sample_size: int = 100) -> dict:
     """Extract schema with categorical value examples for LLM understanding"""
 
-    print("==== Data ====")
-    print(data, flush=True)
-
     # Handle pandas DataFrame
     if hasattr(data, 'empty'):  # Check if it's a DataFrame-like object
         if data.empty:
@@ -189,6 +186,7 @@ def planning_node(state: AgentState) -> AgentState:
         
         return {
             **state,
+            "summarized_query": plan_response["summarized_query"],
             "plan": plan_response["plan"],
             "current_step_index": 0,
             "error": None
@@ -377,21 +375,21 @@ def metric_processing_node(state: AgentState) -> AgentState:
         # Extract which metrics were requested based on the plan steps
         metric_tools = [step for step in plan["steps"] if step["tool"].startswith("get_") and step["tool"] != "get_all_orders" and step["tool"] != "get_schema_info"]
         
-        print("state[tool_result_refs]: ", state["tool_result_refs"])
-        print("metric_tools: ", metric_tools)
+        # print("state[tool_result_refs]: ", state["tool_result_refs"])
+        # print("metric_tools: ", metric_tools)
 
         for metric_step in metric_tools:
             tool_name = metric_step["tool"]
             save_as = metric_step["save_as"]
-            print("tool_name: ", tool_name)
-            print("save_as: ", save_as)
+            # print("tool_name: ", tool_name)
+            # print("save_as: ", save_as)
             if save_as in state["tool_result_refs"]:
                 # Result already calculated
                 metric_results[tool_name] = get_cached_result(state["tool_result_refs"][save_as])
                 print(f"Found cached metric result for {tool_name}: {metric_results[tool_name]}")
         
-        print("==========>>>>> plan", flush=True)
-        print(state['plan'], flush=True)
+        # print("==========>>>>> plan", flush=True)
+        # print(state['plan'], flush=True)
 
         # If no specific metrics in plan, calculate common metrics
         if not metric_results:
@@ -404,8 +402,8 @@ def metric_processing_node(state: AgentState) -> AgentState:
             metric_ref = cache_result(metric_results, key="metric_results")
             print(f"✅ [METRIC_PROCESSING] Calculated {len(metric_results)} metrics", flush=True)
             
-            print("metric_results: ", metric_results)
-            print("metric_ref: ", metric_ref)
+            # print("metric_results: ", metric_results)
+            # print("metric_ref: ", metric_ref)
 
             return {
                 **state,
@@ -429,8 +427,9 @@ def metric_analysis_node(state: AgentState) -> AgentState:
     
     try:
         metrics = state.get("metric_results", {})
-        print("===================", flush=True)
-        print(metrics, flush=True)
+        # print("===================", flush=True)
+        # print(metrics, flush=True)
+       
         if not metrics:
             return {**state, "error": "No metrics available for analysis"}
         

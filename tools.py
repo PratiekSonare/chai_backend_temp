@@ -42,15 +42,22 @@ def get_all_orders(start_date: str, end_date: str) -> List[Dict]:
     # Calculate days difference
     days_diff = (end_dt - start_dt).days
     
+    print(f"Date range: {start_date} to {end_date} (Days: {days_diff})")
+    
     all_orders = []
     
     # If more than 7 days, implement windowing
     if days_diff > 7:
+        print(f"Implementing windowing for {days_diff} days (> 7 days)")
         current_start = start_dt
+        window_num = 1
+        
         while current_start < end_dt:
             current_end = min(current_start + timedelta(days=7), end_dt)
             
-            # Fetch window
+            print(f"Fetching window {window_num}: {current_start} to {current_end}")
+            
+            # Fetch window with pagination
             window_orders = _fetch_orders_window(
                 current_start.strftime("%Y-%m-%d %H:%M:%S"),
                 current_end.strftime("%Y-%m-%d %H:%M:%S"),
@@ -59,13 +66,17 @@ def get_all_orders(start_date: str, end_date: str) -> List[Dict]:
                 base_url
             )
             all_orders.extend(window_orders)
+            print(f"Window {window_num} completed: {len(window_orders)} orders")
             
             # Move to next window
             current_start = current_end
+            window_num += 1
     else:
-        # Single fetch for <= 7 days
+        # Single fetch for <= 7 days with pagination
+        print(f"Fetching all orders for single window ({days_diff} days <= 7)")
         all_orders = _fetch_orders_window(start_date, end_date, api_key, jwt_token, base_url)
     
+    print(f"Total orders fetched across all windows/pages: {len(all_orders)}")
     return all_orders
 
 #for any metric, data calculation, first convert to dataframe and then continue.
@@ -560,13 +571,13 @@ def get_geographic_insights(table: pd.DataFrame, top_n: int = 5) -> dict:
         print(f"Error in calculating geographic insights: {e}")
         return None
 
-
-
 def _fetch_orders_window(start_date: str, end_date: str, api_key: str, jwt_token: str, base_url: str) -> List[Dict]:
-    """Fetch orders for a single 7-day window"""
+    """Fetch all orders for a date window with pagination support"""
+    all_orders = []
     url = f"{base_url}/orders/V2/getAllOrders"
     
     params = {
+        "limit": 250,
         "start_date": start_date,
         "end_date": end_date
     }
@@ -577,20 +588,63 @@ def _fetch_orders_window(start_date: str, end_date: str, api_key: str, jwt_token
         "Content-Type": "application/json"
     }
     
-    try:
-        response = requests.get(url, params=params, headers=headers)
-        response.raise_for_status()
-        
-        data = response.json()
-        if data.get("code") == 200 and "data" in data:
-            return data["data"].get("orders", [])
-        else:
-            print(f"API returned non-200 code: {data}")
-            return []
+    page = 1
     
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching orders: {e}")
-        return []
+    while True:
+        try:
+            print(f"Fetching page {page} for date range {start_date} to {end_date}")
+            response = requests.get(url, params=params, headers=headers)
+            
+            # Check if we got a 400 Bad Request (end of pagination)
+            if response.status_code == 400:
+                print(f"Reached end of pagination (400 Bad Request) at page {page}")
+                break
+                
+            response.raise_for_status()
+            
+            data = response.json()
+            if data.get("code") != 200 or "data" not in data:
+                print(f"API returned non-200 code or missing data: {data}")
+                break
+            
+            # Extract orders from current page
+            page_orders = data["data"].get("orders", [])
+            if not page_orders:
+                print(f"No orders found on page {page}, ending pagination")
+                break
+                
+            all_orders.extend(page_orders)
+            print(f"Fetched {len(page_orders)} orders from page {page}")
+            
+            # Check for nextUrl to continue pagination
+            next_url = data["data"].get("nextUrl")
+            if not next_url:
+                print(f"No nextUrl found, ending pagination at page {page}")
+                break
+            
+            # Update URL for next request
+            # nextUrl is usually a relative path, so prepend base_url
+            try:
+                if next_url.startswith('/'):
+                    url = f"{base_url}{next_url}"
+                elif next_url.startswith('http'):
+                    url = next_url
+                else:
+                    url = f"{base_url}/{next_url.lstrip('/')}"
+            except Exception as e:
+                print(f"Error processing nextUrl '{next_url}': {e}, ending pagination")
+                break
+            
+            # Clear params for subsequent requests since nextUrl contains all needed parameters
+            params = {}
+            page += 1
+            
+        except requests.exceptions.RequestException as e:
+            print(f"Error fetching orders on page {page}: {e}")
+            break
+    
+    print(f"Total orders fetched for window {start_date} to {end_date}: {len(all_orders)}")
+    return all_orders
 
 
 def apply_filters(data: List[Dict], filters: List[Dict]) -> List[Dict]:

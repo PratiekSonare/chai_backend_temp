@@ -51,6 +51,26 @@ class OpenRouterLLM:
 class PlanningLLM(OpenRouterLLM):
     """Planning LLM - generates execution plan from natural language query"""
     
+    def _generate_fallback_summary(self, query: str) -> str:
+        """Generate a simple fallback summary when LLM doesn't provide one"""
+        # Simple keyword-based summary generation
+        query_lower = query.lower()
+        
+        if any(word in query_lower for word in ['compare', 'vs', 'versus']):
+            return "Compare data groups"
+        elif any(word in query_lower for word in ['aov', 'average order', 'order value']):
+            return "Calculate average order value"
+        elif any(word in query_lower for word in ['revenue', 'sales', 'total amount']):
+            return "Calculate total revenue"
+        elif any(word in query_lower for word in ['distribution', 'breakdown', 'split']):
+            return "Analyze data distribution"
+        elif any(word in query_lower for word in ['schema', 'fields', 'structure', 'available']):
+            return "Explore data schema"
+        elif any(word in query_lower for word in ['sku', 'product']):
+            return "Analyze product data"
+        else:
+            return "Analyze orders data"
+    
     def invoke(self, query: str) -> dict:
         """Generate execution plan from query"""
         from datetime import datetime, timedelta
@@ -127,10 +147,15 @@ IMPORTANT WORKFLOW FOR METRIC QUERIES:
 3. Apply filtering if needed
 4. Use appropriate metric tools
 
+IMPORTANT: Always use actual dates in YYYY-MM-DD HH:MM:SS format, never use placeholder text like 'YYYY-MM-DD HH:MM:SS'. 
+
+CRITICAL REQUIREMENT: EVERY JSON response MUST include a "summarized_query" field at the top level with 4-5 words summarizing the user query.
+
 Return ONLY a valid JSON object with this structure:
 
 For metric analysis queries:
 {{
+  "summarized_query": "Calculate metrics for recent orders",
   "query_type": "metric_analysis",
   "steps": [
     {{
@@ -175,6 +200,7 @@ For metric analysis queries:
 
 For schema discovery queries (specific field):
 {{
+  "summarized_query": "Get field constraints and allowed values",
   "query_type": "schema_discovery",
   "steps": [
     {{
@@ -198,6 +224,7 @@ For schema discovery queries (specific field):
 
 For schema discovery queries (all fields):
 {{
+  "summarized_query": "Explore available data fields and structure",
   "query_type": "schema_discovery",
   "steps": [
     {{
@@ -220,6 +247,7 @@ For schema discovery queries (all fields):
 
 For data queries (standard or comparison):
 {{
+  "summarized_query": "Retrieve orders data with optional filtering",
   "query_type": "standard" or "comparison",
   "steps": [
     {{
@@ -249,12 +277,12 @@ Examples:
 - "last week" = start_date: "2026-02-10 00:00:00", end_date: "2026-02-17 23:59:59"
 - "yesterday" = start_date: "2026-02-16 00:00:00", end_date: "2026-02-16 23:59:59"
 - "today" = start_date: "2026-02-17 00:00:00", end_date: "2026-02-17 23:59:59"
-
-IMPORTANT: Always use actual dates in YYYY-MM-DD HH:MM:SS format, never use placeholder text like 'YYYY-MM-DD HH:MM:SS'.
-
-Return ONLY the JSON, no other text."""
+"""
 
         response = self._call_api([{"role": "user", "content": prompt}], temperature=0.3)
+        
+        # Debug: Print raw LLM response
+        print(f"[DEBUG] Raw LLM response: {response[:200]}...")
         
         try:
             # Extract JSON from response (in case LLM adds extra text)
@@ -263,10 +291,26 @@ Return ONLY the JSON, no other text."""
             if json_start >= 0 and json_end > json_start:
                 response = response[json_start:json_end]
             
-            plan = json.loads(response)
+            print(f"[DEBUG] Extracted JSON: {response[:200]}...")
+            
+            plan_data = json.loads(response)
+            print(f"[DEBUG] Parsed plan_data keys: {list(plan_data.keys())}")
+            
+            # Extract summarized_query and remove it from plan_data
+            summarized_query = plan_data.pop("summarized_query", "")
+            print(f"[DEBUG] Extracted summarized_query: '{summarized_query}'")
+            
+            # If summarized_query is empty, try to generate a fallback
+            if not summarized_query:
+                print("[DEBUG] summarized_query is empty, generating fallback from query")
+                # Generate a simple fallback from the user query
+                summarized_query = self._generate_fallback_summary(query)
+                print(f"[DEBUG] Generated fallback: '{summarized_query}'", flush=True)
+            
             return {
                 "success": True,
-                "plan": plan
+                "plan": plan_data,
+                "summarized_query": summarized_query
             }
         except json.JSONDecodeError as e:
             print(f"Failed to parse plan JSON: {e}\nResponse: {response}")
