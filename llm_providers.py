@@ -147,8 +147,7 @@ IMPORTANT WORKFLOW FOR METRIC QUERIES:
 3. Apply filtering if needed
 4. Use appropriate metric tools
 
-IMPORTANT: Always use actual dates in YYYY-MM-DD HH:MM:SS format, never use placeholder text like 'YYYY-MM-DD HH:MM:SS'. 
-
+IMPORTANT: Always use actual dates in YYYY-MM-DD HH:MM:SS format, never use placeholder text like 'YYYY-MM-DD HH:MM:SS'. When asked for chupps.com -> "marketplace": "Shopify",
 CRITICAL REQUIREMENT: EVERY JSON response MUST include a "summarized_query" field at the top level with 4-5 words summarizing the user query.
 
 Return ONLY a valid JSON object with this structure:
@@ -302,7 +301,6 @@ Examples:
             
             # If summarized_query is empty, try to generate a fallback
             if not summarized_query:
-                print("[DEBUG] summarized_query is empty, generating fallback from query")
                 # Generate a simple fallback from the user query
                 summarized_query = self._generate_fallback_summary(query)
                 print(f"[DEBUG] Generated fallback: '{summarized_query}'", flush=True)

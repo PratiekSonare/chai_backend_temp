@@ -11,6 +11,7 @@ from llm_providers import planning_llm, filtering_llm, grouping_llm, insight_llm
 # State schema
 class AgentState(TypedDict):
     user_query: str
+    summarized_query: str | None
     plan: dict | None
     tool_result_refs: dict[str, str]  # {save_as: cache_key} - references only
     tool_result_schemas: dict[str, dict]  # {save_as: schema_with_enums} - lightweight
@@ -964,6 +965,7 @@ if __name__ == '__main__':
     # Example 1: Standard query
     initial_state_standard = AgentState(
         user_query="Show me orders from last 5 days with payment mode prepaid",
+        summarized_query=None,
         plan=None,
         tool_result_refs={},
         tool_result_schemas={},
@@ -987,6 +989,7 @@ if __name__ == '__main__':
     # Example 2: Comparison query
     initial_state_comparison = AgentState(
         user_query="Compare orders between Shopify13 & Flipkart from the last 10 days",
+        summarized_query=None,
         plan=None,
         tool_result_refs={},
         tool_result_schemas={},
@@ -1010,6 +1013,7 @@ if __name__ == '__main__':
     # Example 3: Metric analysis query
     initial_state_metric = AgentState(
         user_query="What is the average order value and revenue from last 7 days?",
+        summarized_query=None,
         plan=None,
         tool_result_refs={},
         tool_result_schemas={},
