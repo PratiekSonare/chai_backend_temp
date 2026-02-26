@@ -1,9 +1,8 @@
 import uuid
 from fastapi import APIRouter, HTTPException
 from models import QueryRequest
-from workflow import workflow_app, AgentState, is_comparison_query
+from workflow import app as workflow_app, AgentState, is_comparison_query
 from utils.connection_manager import manager
-from tools import read_result_ref
 
 router = APIRouter()
 
@@ -108,7 +107,8 @@ async def process_query(request: QueryRequest):
         
         # Get final result
         if result.get("final_result_ref"):
-            final_data = read_result_ref(result["final_result_ref"])
+            from workflow import get_cached_result
+            final_data = get_cached_result(result["final_result_ref"])
             
             response_data = {
                 "success": True,

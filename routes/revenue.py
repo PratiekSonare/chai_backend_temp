@@ -4,6 +4,7 @@ from models import OrdersMetricsRequest
 
 router = APIRouter()
 
+
 @router.post('/revenue/chart/line')
 def revenue_line_chart(request: OrdersMetricsRequest):
     """
