@@ -14,3 +14,7 @@ class LogsRequest(BaseModel):
 
 class OrdersMetricsRequest(BaseModel):
     orders: List[Dict[str, Any]]
+
+class GeographyRequest(BaseModel):
+    orders: List[Dict[str, Any]]
+    state: str

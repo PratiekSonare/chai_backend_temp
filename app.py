@@ -14,6 +14,8 @@ from routes.query import router as query_router
 from routes.orders import router as orders_router
 from routes.revenue import router as revenue_router
 from routes.payment import router as payment_router
+from routes.cancellation import router as cancellation_router
+from routes.geography import router as geography_router
 
 app = FastAPI(
     title="Order Analysis Workflow API",
@@ -37,6 +39,8 @@ app.include_router(query_router)
 app.include_router(orders_router)
 app.include_router(revenue_router)
 app.include_router(payment_router)
+app.include_router(cancellation_router)
+app.include_router(geography_router)
 
 if __name__ == '__main__':
     # Load environment variables

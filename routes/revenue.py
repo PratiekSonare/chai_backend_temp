@@ -57,7 +57,7 @@ def revenue_line_chart(request: OrdersMetricsRequest):
                 'total_amount': 'sum',
                 'order_date': 'size'  # count of orders
             })
-            labels = [d.strftime('%A') for d in grouped.index]  # Monday, Tuesday, etc.
+            labels = [d.strftime('%a') for d in grouped.index]  # Mon, Tue, Wed, etc.
                 
         elif date_range_days <= 90:
             # Weekly view
@@ -78,7 +78,7 @@ def revenue_line_chart(request: OrdersMetricsRequest):
                 'total_amount': 'sum',
                 'order_date': 'size'  # count of orders
             })
-            labels = [d.strftime('%B %Y') for d in grouped.index]
+            labels = [d.strftime('%b %Y') for d in grouped.index]
         
         # Prepare data for chart.js
         revenue_data = []

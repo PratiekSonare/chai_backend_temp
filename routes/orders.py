@@ -310,7 +310,7 @@ def volume_count(request: OrdersMetricsRequest):
             chart_type = "daily"
             df['date_group'] = df['order_date'].dt.date
             grouped_orders = df.groupby('date_group').size()
-            labels = [d.strftime('%A') for d in grouped_orders.index]  # Monday, Tuesday, etc.
+            labels = [d.strftime('%a') for d in grouped_orders.index]  # Mon, Tue, Wed, etc.
             
             # Group suborders by same date grouping for SKU count
             if not suborders_df.empty:
@@ -340,7 +340,7 @@ def volume_count(request: OrdersMetricsRequest):
             chart_type = "monthly"
             df['date_group'] = df['order_date'].dt.to_period('M').dt.start_time
             grouped_orders = df.groupby('date_group').size()
-            labels = [d.strftime('%B %Y') for d in grouped_orders.index]
+            labels = [d.strftime('%b %Y') for d in grouped_orders.index]
             
             # Group suborders by same monthly grouping for SKU count
             if not suborders_df.empty:
