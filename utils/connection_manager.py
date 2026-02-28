@@ -1,19 +1,18 @@
 import json
+import asyncio
 from datetime import datetime
 from typing import Dict, List, Any
-from fastapi import WebSocket
 
 class ConnectionManager:
     def __init__(self):
-        self.active_connections: Dict[str, WebSocket] = {}
+        self.active_connections: Dict[str, asyncio.Queue] = {}
         self.request_logs: Dict[str, List[Dict[str, Any]]] = {}
         self.client_counter = 0
     
-    async def connect(self, websocket: WebSocket) -> str:
-        await websocket.accept()
+    async def connect(self, queue: asyncio.Queue) -> str:
         client_id = f"client_{self.client_counter}"
         self.client_counter += 1
-        self.active_connections[client_id] = websocket
+        self.active_connections[client_id] = queue
         return client_id
     
     def disconnect(self, client_id: str):
@@ -21,21 +20,14 @@ class ConnectionManager:
             del self.active_connections[client_id]
     
     async def broadcast_log(self, log_data: Dict[str, Any]):
-        """Broadcast log data to all connected WebSocket clients"""
+        """Broadcast log data to all connected SSE clients"""
         if self.active_connections:
-            message = json.dumps(log_data)
-            disconnected_clients = []
-            
-            for client_id, connection in self.active_connections.items():
+            for client_id, queue in list(self.active_connections.items()):
                 try:
-                    await connection.send_text(message)
+                    await queue.put(log_data)
                 except Exception as e:
                     print(f"Error sending message to {client_id}: {e}")
-                    disconnected_clients.append(client_id)
-            
-            # Remove disconnected clients
-            for client_id in disconnected_clients:
-                self.disconnect(client_id)
+                    self.disconnect(client_id)
     
     async def log_request_start(self, request_id: str, query: str):
         """Log the start of a request"""
@@ -53,7 +45,7 @@ class ConnectionManager:
             self.request_logs[request_id] = []
         self.request_logs[request_id].append(log_entry)
         
-        # Broadcast to WebSocket clients
+        # Broadcast to SSE clients
         await self.broadcast_log(log_entry)
     
     async def log_request_step(self, request_id: str, step: str, message: str, **kwargs):
@@ -72,7 +64,7 @@ class ConnectionManager:
             self.request_logs[request_id] = []
         self.request_logs[request_id].append(log_entry)
         
-        # Broadcast to WebSocket clients
+        # Broadcast to SSE clients
         await self.broadcast_log(log_entry)
     
     async def log_request_end(self, request_id: str, has_error: bool = False, error: str = None):
@@ -97,7 +89,7 @@ class ConnectionManager:
             self.request_logs[request_id] = []
         self.request_logs[request_id].append(log_entry)
         
-        # Broadcast to WebSocket clients
+        # Broadcast to SSE clients
         await self.broadcast_log(log_entry)
     
     def get_request_logs(self, request_id: str) -> List[Dict[str, Any]]:

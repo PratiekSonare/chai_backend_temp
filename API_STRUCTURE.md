@@ -11,13 +11,13 @@ backend/
 ├── routes/                # API route modules
 │   ├── __init__.py
 │   ├── health.py          # Health checks and examples
-│   ├── websocket.py       # WebSocket endpoints for logging
+│   ├── websocket.py       # SSE endpoints for logging
 │   ├── query.py           # Query processing endpoints (/plan, /query)
 │   ├── orders.py          # Order-related endpoints (/orders/*)
 │   └── revenue.py         # Revenue-related endpoints (/revenue/*)
 ├── utils/                 # Utility modules
 │   ├── __init__.py
-│   └── connection_manager.py  # WebSocket connection management
+│   └── connection_manager.py  # SSE connection management
 ├── workflow.py            # Existing workflow logic
 ├── tools.py              # Existing tools
 └── llm_providers.py       # Existing LLM providers
@@ -40,8 +40,8 @@ backend/
 ### Revenue
 - `POST /revenue/chart/line` - Get revenue and AOV chart data
 
-### WebSocket
-- `WS /ws/logs` - Real-time log streaming
+### SSE
+- `GET /sse/logs` - Real-time log streaming
 - `GET /logs/{request_id}` - Get logs for specific request
 
 ## Benefits of New Structure

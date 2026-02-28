@@ -64,6 +64,10 @@ async def process_query(request: QueryRequest):
     user_query = request.query.strip()
     request_id = str(uuid.uuid4())[:8]
     
+    # Create logger function for workflow
+    async def workflow_logger(req_id: str, step: str, message: str):
+        await manager.log_request_step(req_id, step, message)
+    
     try:
         await manager.log_request_start(request_id, user_query)
         await manager.log_request_step(request_id, "initialize", "Initializing workflow")
@@ -82,6 +86,8 @@ async def process_query(request: QueryRequest):
             final_result_ref=None,
             error=None,
             retry_count=0,
+            logger=workflow_logger,
+            request_id=request_id,
             comparison_mode=False,  # Will be set by planning LLM
             comparison_groups=None,
             group_results=None,
@@ -98,7 +104,7 @@ async def process_query(request: QueryRequest):
         await manager.log_request_step(request_id, "execute_workflow", "Running order analysis workflow")
 
         print("running state...", flush=True)
-        result = workflow_app.invoke(initial_state)
+        result = await workflow_app.ainvoke(initial_state)
         
         # Debug: Print the result structure
         print("workflow result keys:", list(result.keys()) if isinstance(result, dict) else type(result), flush=True)

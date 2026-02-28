@@ -17,7 +17,7 @@ def get_examples():
         "endpoints": {
             "/plan": "POST - Generate execution plan without running the query",
             "/query": "POST - Execute the full query workflow and return results",
-            "/ws/logs": "WebSocket - Real-time log streaming for all requests",
+            "/sse/logs": "SSE - Real-time log streaming for all requests",
             "/logs/{request_id}": "GET - Retrieve logs for a specific request ID"
         },
         "schema_discovery_queries": [

@@ -1,4 +1,4 @@
-from typing import TypedDict, Annotated, Literal
+from typing import TypedDict, Annotated, Literal, Callable, Any
 from langgraph.graph import StateGraph, END
 import operator
 import pandas as pd
@@ -20,6 +20,8 @@ class AgentState(TypedDict):
     final_result_ref: str | None  # Reference to final result
     error: str | None
     retry_count: int
+    logger: Any  # Logger function for SSE
+    request_id: str | None  # Request ID for logging
     # Comparison-specific fields
     comparison_mode: bool
     comparison_groups: list[dict] | None  # [{group_id, filters}, ...]
@@ -170,8 +172,11 @@ def extract_schema_with_enums(data: dict | list, sample_size: int = 100) -> dict
         return schema
 
 # Node functions
-def planning_node(state: AgentState) -> AgentState:
+async def planning_node(state: AgentState) -> AgentState:
     """Planning LLM generates execution plan"""
+    if state.get("logger"):
+        await state["logger"](state.get("request_id", "unknown"), "PLANNING", f"Query: '{state['user_query'][:60]}...'")
+    
     print(f"🧠 [PLANNING] Query: '{state['user_query'][:60]}...' | Error: {state.get('error', 'None')}", flush=True)
     try:
         # Call your planning LLM here
@@ -182,6 +187,9 @@ def planning_node(state: AgentState) -> AgentState:
                 **state,
                 "error": "Planning failed: " + plan_response.get("error", "Unknown error")
             }
+        
+        if state.get("logger"):
+            await state["logger"](state.get("request_id", "unknown"), "PLANNING", f"Plan created: {plan_response['plan'].get('query_type', 'unknown')} query")
         
         print(f"✅ [PLANNING] Plan created: {plan_response['plan'].get('query_type', 'unknown')} query", flush=True)
         
@@ -194,13 +202,20 @@ def planning_node(state: AgentState) -> AgentState:
         }
     
     except Exception as e:
+        if state.get("logger"):
+            await state["logger"](state.get("request_id", "unknown"), "PLANNING", f"Error: {str(e)}")
+        
         print(f"❌ [PLANNING] Error: {str(e)}", flush=True)
         return {**state, "error": f"Planning error: {str(e)}"}
 
-def execute_tool_node(state: AgentState) -> AgentState:
+async def execute_tool_node(state: AgentState) -> AgentState:
     """Execute the current step's tool"""
     step_idx = state["current_step_index"]
     total_steps = len(state["plan"]["steps"]) if state["plan"] else 0
+    
+    if state.get("logger"):
+        await state["logger"](state.get("request_id", "unknown"), "EXECUTE_TOOL", f"Step {step_idx + 1}/{total_steps} | Retry: {state.get('retry_count', 0)}")
+    
     print(f"🔧 [EXECUTE_TOOL] Step {step_idx + 1}/{total_steps} | Retry: {state.get('retry_count', 0)}", flush=True)
 
     #print(state, flush=True)
@@ -236,10 +251,16 @@ def execute_tool_node(state: AgentState) -> AgentState:
         
         # Log successful execution
         if isinstance(result, list):
+            if state.get("logger"):
+                await state["logger"](state.get("request_id", "unknown"), "EXECUTE_TOOL", f"Tool executed: {step['tool']} | Records: {len(result)}")
             print(f"✅ [EXECUTE_TOOL] Tool executed: {step['tool']} | Records: {len(result)}", flush=True)
         elif isinstance(result, dict) and "available_fields" in result:
+            if state.get("logger"):
+                await state["logger"](state.get("request_id", "unknown"), "EXECUTE_TOOL", f"Tool executed: {step['tool']} | Schema info retrieved")
             print(f"✅ [EXECUTE_TOOL] Tool executed: {step['tool']} | Schema info retrieved", flush=True)
         else:
+            if state.get("logger"):
+                await state["logger"](state.get("request_id", "unknown"), "EXECUTE_TOOL", f"Tool executed: {step['tool']} | Result type: {type(result).__name__}")
             print(f"✅ [EXECUTE_TOOL] Tool executed: {step['tool']} | Result type: {type(result).__name__}", flush=True)
         
         # Cache the actual result data (not in state)

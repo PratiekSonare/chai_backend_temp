@@ -49,6 +49,10 @@ def pincode_list(request: GeographyRequest):
         # Get order count per pincode for additional insights
         pincode_order_counts = state_filtered['pin_code'].value_counts().to_dict()
         
+        # Sort pincodes by order count in decreasing order
+        sorted_pincode_counts = dict(sorted(pincode_order_counts.items(), key=lambda item: item[1], reverse=True))
+        unique_pincodes = list(sorted_pincode_counts.keys())
+        
         return {
             "success": True,
             "state": target_state,
@@ -56,13 +60,13 @@ def pincode_list(request: GeographyRequest):
             "pincodes": unique_pincodes,
             "pincode_details": {
                 pincode: {
-                    "order_count": pincode_order_counts[pincode]
+                    "order_count": sorted_pincode_counts[pincode]
                 }
                 for pincode in unique_pincodes
             },
             "chart_data": {
-                "labels": list(pincode_order_counts.keys()),
-                "values": list(pincode_order_counts.values())
+                "labels": list(sorted_pincode_counts.keys()),
+                "values": list(sorted_pincode_counts.values())
             }
         }
         
