@@ -8,6 +8,9 @@ from typing import List, Dict, Any
 import pandas as pd
 import numpy as np
 import json
+import boto3
+
+s3 = boto3.client('s3')
 
 def get_all_orders(start_date: str, end_date: str) -> List[Dict]:
     """

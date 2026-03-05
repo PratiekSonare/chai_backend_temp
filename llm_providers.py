@@ -92,7 +92,7 @@ CRITICAL: When generating dates in JSON responses, always use actual date values
 User Query: "{query}"
 
 Available Tools:
-1. get_all_orders - Fetch order data for a date range
+1. get_all_orders_recent - Fetch order data for a date range
 2. get_schema_info - Get schema/metadata about available fields and constraints
    - Optional param "field": Specify a field name (e.g., "payment_mode") to get only that field's info
    - Without "field": Returns complete schema for all fields
@@ -161,8 +161,8 @@ For metric analysis queries:
       "id": "step1",
       "tool": "get_all_orders",
       "params": {{
-        "start_date": "YYYY-MM-DD HH:MM:SS",
-        "end_date": "YYYY-MM-DD HH:MM:SS"
+        "start_date": "2026-02-28 00:00:00",
+        "end_date": "2026-03-05 23:59:59"
       }},
       "depends_on": [],
       "save_as": "orders_data"
@@ -191,8 +191,8 @@ For metric analysis queries:
     "type": null
   }},
   "base_params": {{
-    "start_date": "YYYY-MM-DD HH:MM:SS",
-    "end_date": "YYYY-MM-DD HH:MM:SS"
+    "start_date": "2026-02-28 00:00:00",
+    "end_date": "2026-03-05 23:59:59"
   }},
   "tool": "get_all_orders"
 }}
@@ -253,8 +253,8 @@ For data queries (standard or comparison):
       "id": "step1",
       "tool": "get_all_orders",
       "params": {{
-        "start_date": "YYYY-MM-DD HH:MM:SS",
-        "end_date": "YYYY-MM-DD HH:MM:SS"
+        "start_date": "2026-02-23 00:00:00",
+        "end_date": "2026-03-05 23:59:59"
       }},
       "depends_on": [],
       "save_as": "orders_data"
@@ -265,17 +265,17 @@ For data queries (standard or comparison):
     "type": "filter"
   }},
   "base_params": {{
-    "start_date": "YYYY-MM-DD HH:MM:SS",
-    "end_date": "YYYY-MM-DD HH:MM:SS"
+    "start_date": "2026-02-23 00:00:00",
+    "end_date": "2026-03-05 23:59:59"
   }},
   "tool": "get_all_orders"
 }}
 
 Examples:
-- "last 5 days" = start_date: "2026-02-12 00:00:00", end_date: "2026-02-17 23:59:59"
-- "last week" = start_date: "2026-02-10 00:00:00", end_date: "2026-02-17 23:59:59"
-- "yesterday" = start_date: "2026-02-16 00:00:00", end_date: "2026-02-16 23:59:59"
-- "today" = start_date: "2026-02-17 00:00:00", end_date: "2026-02-17 23:59:59"
+- "last 5 days" = start_date: "2026-02-28 00:00:00", end_date: "2026-03-05 23:59:59"
+- "last week" = start_date: "2026-02-26 00:00:00", end_date: "2026-03-05 23:59:59"
+- "yesterday" = start_date: "2026-03-04 00:00:00", end_date: "2026-03-04 23:59:59"
+- "today" = start_date: "2026-03-05 00:00:00", end_date: "2026-03-05 23:59:59"
 """
 
         response = self._call_api([{"role": "user", "content": prompt}], temperature=0.3)
@@ -505,13 +505,16 @@ If statistical summaries are provided, explain what the quartiles and standard d
 If geographic data is available, provide location-based insights.
 If conversion rates are included, comment on business performance.
 
-IMPORTANT: Format your response in an unordered-list using HTML. Add <strong> tag wherever necessary. Each point should be a new list-item in this unordered-list output.
+IMPORTANT: Format your response in Markdown. Use bullet points for each insight.
 Strictly use this exact format:
-<ul>
-  <li>[point 1.]</li>
-  <li>[point 2.]</li>
-  ...and so on.
-</ul> 
+
+- **[Bold title/metric]:** [detailed explanation with specific numbers]
+- **[Bold title/metric]:** [detailed explanation with specific numbers]
+- **[Bold title/metric]:** [detailed explanation with specific numbers]
+
+Example:
+- **Order Volume Leadership:** Maharashtra recorded 505 orders, significantly outperforming Telangana's 154 orders by 69.5%
+- **Revenue Performance:** Maharashtra generated ₹282,699 total revenue compared to Telangana's ₹106,043 
 """
 
         response = self._call_api([{"role": "user", "content": prompt}], temperature=0.5)
@@ -522,55 +525,272 @@ Strictly use this exact format:
         }
 
 
-class InsightLLM(OpenRouterLLM):
-    """Insight generation LLM - creates natural language summaries"""
+class NewsRetrievalLLM(OpenRouterLLM):
+    """News retrieval LLM - fetches and analyzes relevant news for market context"""
+    
+    def __init__(self):
+        super().__init__()
+        # You'll need API keys for news services
+        self.news_api_key = os.getenv("NEWS_API_KEY")  # newsapi.org
+        self.gnews_api_key = os.getenv("GNEWS_API_KEY")  # gnews.io
+    
+    def fetch_news(self, keywords: list, date_range: dict, sources: list = None) -> list:
+        """Fetch news articles for given keywords and date range"""
+        try:
+            import requests
+            from datetime import datetime
+            
+            articles = []
+            
+            # NewsAPI.org implementation
+            if self.news_api_key:
+                articles.extend(self._fetch_from_newsapi(keywords, date_range, sources))
+            
+            # GNews.io implementation  
+            if self.gnews_api_key:
+                articles.extend(self._fetch_from_gnews(keywords, date_range))
+                
+            return articles[:20]  # Limit to 20 most relevant articles
+            
+        except Exception as e:
+            print(f"News fetch error: {e}")
+            return []
+    
+    def _fetch_from_newsapi(self, keywords: list, date_range: dict, sources: list = None) -> list:
+        """Fetch from NewsAPI.org"""
+        import requests
+        query = " OR ".join(keywords)
+        
+        params = {
+            "q": query,
+            "from": date_range["start_date"][:10],  # YYYY-MM-DD format
+            "to": date_range["end_date"][:10],
+            "language": "en",
+            "sortBy": "relevancy",
+            "apiKey": self.news_api_key
+        }
+        
+        if sources:
+            params["sources"] = ",".join(sources)
+        
+        response = requests.get("https://newsapi.org/v2/everything", params=params)
+        response.raise_for_status()
+        
+        data = response.json()
+        return data.get("articles", [])
+    
+    def _fetch_from_gnews(self, keywords: list, date_range: dict) -> list:
+        """Fetch from GNews.io"""
+        import requests
+        from urllib.parse import quote
+        
+        query = quote(" OR ".join(keywords))
+        
+        params = {
+            "q": query,
+            "from": date_range["start_date"][:10],
+            "to": date_range["end_date"][:10],
+            "lang": "en",
+            "country": "in",  # India-specific news
+            "max": 10,
+            "apikey": self.gnews_api_key
+        }
+        
+        response = requests.get("https://gnews.io/api/v4/search", params=params)
+        response.raise_for_status()
+        
+        data = response.json()
+        return data.get("articles", [])
     
     def invoke(self, params: dict) -> dict:
-        """Generate natural language insights from comparison"""
+        """Generate market insights from news data"""
         query = params.get("query", "")
-        comparison = params.get("comparison", {})
-        metrics = params.get("metrics", {})
+        date_range = params.get("date_range", {})
+        business_metrics = params.get("metrics", {})
         
-        prompt = f"""You are a data insights analyst for an e-commerce order system.
+        # Extract keywords for news search based on your footwear business
+        keywords = self._extract_news_keywords(query)
+        
+        # Fetch relevant news from all available sources
+        news_articles = self.fetch_news(keywords, date_range)
+        
+        if not news_articles:
+            return {"market_context": "No relevant news found for the specified period."}
+        
+        # Analyze news impact
+        market_analysis = self._analyze_market_impact(news_articles, business_metrics, query)
+        
+        return {
+            "market_context": market_analysis,
+            "news_articles_count": len(news_articles),
+            "keywords_used": keywords
+        }
+    
+    def _extract_news_keywords(self, query: str) -> list:
+        """Extract relevant keywords for news search based on footwear business"""
+        base_keywords = [
+            "footwear industry", "shoe sales", "fashion retail", 
+            "e-commerce fashion", "online shopping trends",
+            "consumer spending", "retail sales India", "open footwear india", "sliders india"
+        ]
+        
+        query_lower = query.lower()
+        
+        # Add specific keywords based on query context
+        if any(word in query_lower for word in ['festival', 'diwali', 'eid', 'christmas']):
+            base_keywords.extend(["festival shopping", "seasonal sales", "festive discounts"])
+        
+        if any(word in query_lower for word in ['monsoon', 'summer', 'winter']):
+            base_keywords.extend(["seasonal footwear", "weather impact retail"])
+            
+        if any(word in query_lower for word in ['compare', 'vs', 'marketplace']):
+            base_keywords.extend(["flipkart", "amazon", "myntra", "marketplace competition", "birkenstock", "asian shoes", ""])
+        
+        print("[NEWS]: base keywords -", base_keywords, flush=True)
+        return base_keywords
+    
+    def _analyze_market_impact(self, articles: list, metrics: dict, query: str) -> str:
+        """Analyze news impact on business metrics"""
+        # Prepare news summary for LLM analysis
+        news_summary = []
+        for article in articles[:10]:  # Top 10 articles
+            news_summary.append({
+                "title": article.get("title", ""),
+                "description": article.get("description", ""),
+                "published_date": article.get("publishedAt", ""),
+                "source": article.get("source", {}).get("name", "")
+            })
+        
+        prompt = f"""You are a market analyst specializing in e-commerce and footwear retail.
 
 User Query: "{query}"
 
-Comparison Data:
-{json.dumps(comparison, indent=2)}
-
-Detailed Metrics by Group:
+Business Metrics:
 {json.dumps(metrics, indent=2)}
 
-Generate a comprehensive, natural language analysis of this comparison. 
+Recent Market News:
+{json.dumps(news_summary, indent=2)}
 
-IMPORTANT: Format your response in HTML. Each point should be a new list-item in this unordered-list output.
-Strictly use this exact format:
-<ul>
-  <li>[point 1.]</li>
-  <li>[point 2.]</li>
-  ...and so on.
-</ul> 
+Analyze how the market events and news might have influenced the business metrics shown above.
 
-The comparison data may be either:
-- "pairwise" (2 groups): Direct A vs B comparison with specific differences and percentages
-- "multi_group" (3+ groups): Multiple groups with a baseline comparison and overall winners
+Focus on:
+- **Economic Factors:** Interest rates, inflation, consumer confidence affecting purchasing power
+- **Industry Trends:** Fashion trends, seasonal patterns, competitor activities
+- **Market Events:** Sales events, festivals, policy changes, supply chain issues
+- **Consumer Behavior:** Shift in shopping patterns, payment preferences, regional preferences
+- **Platform Competition:** Marketplace dynamics, commission changes, policy updates
+- **Seasonal Trends:** Trends occuring due to seasonal variety
 
-Include:
-- Clear comparison of order volumes with specific numbers and percentages
-- Revenue comparison with specific amounts and growth/decline percentages
-- Average order value analysis
-- Key insights and trends
-- Winner by different metrics (volume, revenue, avg value)
-- For multi-group comparisons: highlight how each group compares to the baseline and overall rankings
-- Additional interesting findings from the detailed metrics (payment mode distribution, order status, cities, etc.)
+Provide insights in this format:
+- **[Market Factor]:** [How it likely impacted your metrics with specific references]
 
-Make each point conversational, data-driven, and actionable.
+Be specific about correlations between news events and your sales data. All monetary values in INR.
+"""
 
-Return your insights in the numbered point format described above."""
+        response = self._call_api([{"role": "user", "content": prompt}], temperature=0.6)
+        return response.strip()
+
+
+class InsightLLM(OpenRouterLLM):
+    """Insight generation LLM - creates natural language summaries with market context"""
+    
+    def invoke(self, params: dict) -> dict:
+        """Generate natural language insights from comparison with market context"""
+        query = params.get("query", "")
+        comparison = params.get("comparison", {})
+        metrics = params.get("metrics", {})
+        date_range = params.get("date_range", {})
+        
+        # Get market context from news
+        market_context = ""
+        print(f"DEBUG: date_range = {date_range}", flush=True)
+        print(f"DEBUG: should_include_news_context = {self._should_include_news_context(query)}", flush=True)
+        print(f"DEBUG: condition check = {date_range and self._should_include_news_context(query)}", flush=True)
+        
+        if date_range and self._should_include_news_context(query):
+            print("DEBUG: Entering news context fetch block", flush=True)
+            try:
+                print("DEBUG: Creating NewsRetrievalLLM instance", flush=True)
+                news_llm = NewsRetrievalLLM()
+                print("DEBUG: Calling news_llm.invoke", flush=True)
+                news_result = news_llm.invoke({
+                    "query": query,
+                    "date_range": date_range,
+                    "metrics": metrics
+                })
+                market_context = news_result.get("market_context", "")
+                print("NEWS RESULT: ", news_result, flush=True)
+                
+            except Exception as e:
+                print(f"News context fetch failed: {e}", flush=True)
+                market_context = ""
+        else:
+            print("DEBUG: Skipping news context fetch due to condition check", flush=True)
+        
+        prompt = f"""You are a data insights analyst for an e-commerce footwear order system.
+
+        User Query: "{query}"
+
+        Comparison Data:
+        {json.dumps(comparison, indent=2)}
+
+        Detailed Metrics by Group:
+        {json.dumps(metrics, indent=2)}
+
+        Market Context from News Analysis:
+        {market_context}
+
+        Generate a comprehensive analysis combining your sales data insights with market context. 
+
+        IMPORTANT: Format your response in Markdown. Use bullet points for each insight.
+        Strictly use this exact format:
+
+        - **Bold title/metric:** [detailed explanation with specific numbers]
+        - **Bold title/metric:** [detailed explanation with specific numbers]
+
+        Example:
+        - **Order Volume Performance:** Maharashtra leads with 505 orders vs Telangana's 154 orders (69.5% higher)
+        - **Revenue Analysis:** Total revenue shows Maharashtra at ₹282,699 compared to Telangana's ₹106,043 
+
+        The comparison data may be either:
+        - "pairwise" (2 groups): Direct A vs B comparison with specific differences and percentages
+        - "multi_group" (3+ groups): Multiple groups with a baseline comparison and overall winners
+
+        Include both DATA-DRIVEN insights and MARKET CONTEXT insights:
+        
+        DATA INSIGHTS:
+        - Order volume comparisons with percentages
+        - Revenue analysis with specific amounts  
+        - AOV trends and patterns
+        - Geographic and demographic patterns
+        - Payment mode and marketplace performance differences
+        
+        MARKET CONTEXT INSIGHTS (if available):
+        - How external market factors may have influenced your metrics
+        - Industry trends affecting your footwear performance
+        - Competitive landscape impact on sales
+        - Economic factors correlation with sales patterns
+        - Seasonal and event-driven factors
+
+        Make insights actionable and business-focused for footwear e-commerce.
+
+        Return your insights in the numbered point format described above."""
 
         response = self._call_api([{"role": "user", "content": prompt}], temperature=0.7)
         
-        return {"insights": response.strip()}
+        return {
+            "insights": response.strip(),
+            "market_context_included": bool(market_context)
+        }
+    
+    def _should_include_news_context(self, query: str) -> bool:
+        """Determine if news context would be valuable for this query"""
+        context_keywords = [
+            "compare", "performance", "trends", "analysis", 
+            "why", "reason", "factor", "impact", "decline", "growth",
+            "market", "industry", "competition", "seasonal"
+        ]
+        return any(keyword in query.lower() for keyword in context_keywords)
 
 
 # Singleton instances
@@ -579,3 +799,4 @@ filtering_llm = FilteringLLM()
 grouping_llm = GroupingLLM()
 insight_llm = InsightLLM()
 metric_llm = MetricLLM()
+news_llm = NewsRetrievalLLM()

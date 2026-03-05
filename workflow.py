@@ -25,6 +25,7 @@ class AgentState(TypedDict):
     # Comparison-specific fields
     comparison_mode: bool
     comparison_groups: list[dict] | None  # [{group_id, filters}, ...]
+    comparison_param: str | None  # The field being compared (e.g., "state", "marketplace", "payment_mode")
     group_results: dict[str, str] | None  # {group_id: cache_ref}
     group_schemas: dict[str, dict] | None  # {group_id: schema}
     current_group_index: int
@@ -416,7 +417,6 @@ def metric_processing_node(state: AgentState) -> AgentState:
         # If no specific metrics in plan, calculate common metrics
         if not metric_results:
             # Use the common metrics tool
-            print("==========>>>>> calculating common metrics", flush=True)
             metric_results = TOOL_REGISTRY["get_common_metrics"](result_data)
         
         # Cache metric results
@@ -529,11 +529,22 @@ def grouping_node(state: AgentState) -> AgentState:
         })
         
         groups = grouping_response.get("groups", [])
-        print(f"✅ [GROUPING] Found {len(groups)} groups: {[g['group_id'] for g in groups]}", flush=True)
+        
+        # Extract comparison parameter (the field being compared)
+        comparison_param = None
+        if groups and len(groups) > 0:
+            # Get the field being compared from the first group's filters
+            first_group_filters = groups[0].get("filters", {})
+            if first_group_filters:
+                # Take the first (and typically only) filter field as the comparison dimension
+                comparison_param = list(first_group_filters.keys())[0]
+        
+        print(f"✅ [GROUPING] Found {len(groups)} groups comparing by '{comparison_param}': {[g['group_id'] for g in groups]}", flush=True)
         
         return {
             **state,
             "comparison_groups": grouping_response["groups"],
+            "comparison_param": comparison_param,
             "group_results": {},
             "group_schemas": {},
             "current_group_index": 0,
@@ -692,6 +703,8 @@ def comparison_node(state: AgentState) -> AgentState:
             
             comparison_results = {
                 "comparison_type": "pairwise",
+                "comparison_mode": True,
+                "comparison_param": state.get("comparison_param"),
                 "groups": {"a": group_a, "b": group_b},
                 "order_count": {
                     "a": metrics_a["count"],
@@ -757,6 +770,8 @@ def comparison_node(state: AgentState) -> AgentState:
             
             comparison_results = {
                 "comparison_type": "multi_group",
+                "comparison_mode": True,
+                "comparison_param": state.get("comparison_param"),
                 "num_groups": num_groups,
                 "groups": group_ids,
                 "baseline": baseline_id,
@@ -787,10 +802,31 @@ def insight_generation_node(state: AgentState) -> AgentState:
     
     try:
         # Call insight LLM to generate natural language summary
+        # Extract date range from plan base_params or first step params
+        date_range = {}
+        if state["plan"].get("base_params"):
+            base_params = state["plan"]["base_params"]
+            if "start_date" in base_params and "end_date" in base_params:
+                date_range = {
+                    "start_date": base_params["start_date"],
+                    "end_date": base_params["end_date"]
+                }
+        
+        # Fallback: extract from first step if base_params not available
+        if not date_range and state["plan"].get("steps"):
+            first_step = state["plan"]["steps"][0]
+            step_params = first_step.get("params", {})
+            if "start_date" in step_params and "end_date" in step_params:
+                date_range = {
+                    "start_date": step_params["start_date"],
+                    "end_date": step_params["end_date"]
+                }
+        
         insight_response = insight_llm.invoke({
             "query": state["user_query"],
             "metrics": state["aggregated_metrics"],
-            "comparison": state["comparison_results"]
+            "comparison": state["comparison_results"],
+            "date_range": date_range
         })
         
         print(f"✅ [INSIGHTS] Generated {len(insight_response['insights'])} chars of insights", flush=True)
@@ -997,6 +1033,7 @@ if __name__ == '__main__':
         retry_count=0,
         comparison_mode=False,
         comparison_groups=None,
+        comparison_param=None,
         group_results=None,
         group_schemas=None,
         current_group_index=0,
@@ -1021,6 +1058,7 @@ if __name__ == '__main__':
         retry_count=0,
         comparison_mode=True,
         comparison_groups=None,
+        comparison_param=None,
         group_results=None,
         group_schemas=None,
         current_group_index=0,
@@ -1045,6 +1083,7 @@ if __name__ == '__main__':
         retry_count=0,
         comparison_mode=False,
         comparison_groups=None,
+        comparison_param=None,
         group_results=None,
         group_schemas=None,
         current_group_index=0,
