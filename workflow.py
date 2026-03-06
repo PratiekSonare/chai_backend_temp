@@ -345,7 +345,8 @@ def apply_filters_node(state: AgentState) -> AgentState:
         filtered_data = apply_filters(result_data, state["filters"])
         
         # Cache filtered result and store reference
-        final_ref = cache_result(filtered_data, key="final_result")
+        final_result = {"data": filtered_data, "plan": state["plan"]}
+        final_ref = cache_result(final_result, key="final_result")
         
         print(f"✅ [APPLY_FILTERS] Filtered: {len(result_data) if isinstance(result_data, list) else 1} → {len(filtered_data) if isinstance(filtered_data, list) else 1} records", flush=True)
         
@@ -366,10 +367,14 @@ def no_filter_node(state: AgentState) -> AgentState:
     last_step = plan["steps"][-1]
     ref_key = state["tool_result_refs"][last_step["save_as"]]
     
-    # Reference the cached result as final result
+    # Retrieve data and wrap with plan
+    data = get_cached_result(ref_key)
+    final_result = {"data": data, "plan": state["plan"]}
+    final_ref = cache_result(final_result, key="final_result")
+    
     return {
         **state,
-        "final_result_ref": ref_key,
+        "final_result_ref": final_ref,
         "error": None
     }
 
@@ -498,7 +503,8 @@ def metric_analysis_node(state: AgentState) -> AgentState:
             "query": state["user_query"],
             "metrics": metrics,
             "analysis": analysis_text,
-            "metrics_calculated": analysis_response.get("metrics_used", [])
+            "metrics_calculated": analysis_response.get("metrics_used", []),
+            "plan": state["plan"]
         }
         
         # Cache the final analyzed result
@@ -645,7 +651,8 @@ def aggregation_node(state: AgentState) -> AgentState:
                 "avg_order_value": 0,
                 "payment_mode_distribution": {},
                 "order_status_distribution": {},
-                "top_cities": {}
+                "top_cities": {},
+                "top_states": {}
             }
             
             if metrics["count"] > 0:
@@ -665,6 +672,10 @@ def aggregation_node(state: AgentState) -> AgentState:
                     # Cities
                     city = record.get("city", "Unknown")
                     metrics["top_cities"][city] = metrics["top_cities"].get(city, 0) + 1
+                    
+                    # States
+                    billing_state = record.get("billing_state", "Unknown")
+                    metrics["top_states"][billing_state] = metrics["top_states"].get(billing_state, 0) + 1
             
             aggregated_metrics[group_id] = metrics
         
@@ -747,7 +758,8 @@ def comparison_node(state: AgentState) -> AgentState:
                     "avg_order_value": group_metrics["avg_order_value"],
                     "payment_mode_distribution": group_metrics["payment_mode_distribution"],
                     "order_status_distribution": group_metrics["order_status_distribution"],
-                    "top_cities": group_metrics["top_cities"]
+                    "top_cities": group_metrics["top_cities"],
+                    "top_states": group_metrics["top_states"]
                 }
             
             # Compare each group to baseline
@@ -835,7 +847,8 @@ def insight_generation_node(state: AgentState) -> AgentState:
         final_ref = cache_result({
             "insights": insight_response["insights"],
             "comparison_data": state["comparison_results"],
-            "detailed_metrics": state["aggregated_metrics"]
+            "detailed_metrics": state["aggregated_metrics"],
+            "plan": state["plan"]
         }, key="comparison_final")
         
         return {
@@ -1099,10 +1112,12 @@ if __name__ == '__main__':
 
     if result_standard["final_result_ref"]:
         final_data = get_cached_result(result_standard["final_result_ref"])
-        if isinstance(final_data, list):
-            print(f"Found {len(final_data)} records")
+        print(f"Plan: {final_data['plan']}")
+        data = final_data['data']
+        if isinstance(data, list):
+            print(f"Found {len(data)} records")
         else:
-            print(f"Result: {final_data}")
+            print(f"Result: {data}")
     else:
         print(f"Error: {result_standard['error']}")
 
@@ -1111,6 +1126,7 @@ if __name__ == '__main__':
 
     if result_comparison["final_result_ref"]:
         final_data = get_cached_result(result_comparison["final_result_ref"])
+        print(f"Plan: {final_data['plan']}")
         print(f"\nComparison Insights:\n{final_data['insights']}")
         print(f"\nComparison Data: {final_data['comparison_data']}")
     else:
@@ -1125,6 +1141,7 @@ if __name__ == '__main__':
 
     if result_metric["final_result_ref"]:
         final_data = get_cached_result(result_metric["final_result_ref"])
+        print(f"Plan: {final_data['plan']}")
         print(f"\nQuery: {final_data['query']}")
         print(f"\nMetrics: {final_data['metrics']}")
         print(f"\nAnalysis:\n{final_data['analysis']}")
