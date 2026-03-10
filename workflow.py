@@ -210,7 +210,19 @@ async def planning_node(state: AgentState) -> AgentState:
         return {**state, "error": f"Planning error: {str(e)}"}
 
 async def execute_tool_node(state: AgentState) -> AgentState:
-    """Execute the current step's tool"""
+    """Execute the current step's tool
+    
+    TODO: PARALLEL EXECUTION ENHANCEMENT
+    Current implementation executes steps sequentially. For better performance,
+    steps with identical depends_on values could be executed in parallel.
+    
+    Example optimization opportunity:
+    - step3a: get_total_revenue (depends_on: ["step2"])
+    - step3b: get_aov (depends_on: ["step2"])  
+    - step3c: get_order_count (depends_on: ["step2"])
+    
+    These three could run simultaneously since they all depend only on step2.
+    """
     step_idx = state["current_step_index"]
     total_steps = len(state["plan"]["steps"]) if state["plan"] else 0
     
@@ -240,7 +252,7 @@ async def execute_tool_node(state: AgentState) -> AgentState:
             
             # Replace placeholder values in params with actual dependency data
             for param_key, param_value in resolved_params.items():
-                if isinstance(param_value, str) and param_value == f"{{{dep_step['save_as']}}}":
+                if isinstance(param_value, str) and param_value == f"{{{{{dep_step['save_as']}}}}}":
                     resolved_params[param_key] = dep_data
         
         # Execute tool (map tool name to actual function)
@@ -514,7 +526,6 @@ def metric_analysis_node(state: AgentState) -> AgentState:
         
         return {
             **state,
-            "metric_analysis": analysis_text,
             "final_result_ref": final_ref,
             "error": None
         }

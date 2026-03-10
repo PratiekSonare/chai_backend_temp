@@ -548,6 +548,103 @@ def get_common_metrics(data) -> dict:
         return {"error": f"Failed to calculate metrics: {str(e)}"}
 
 
+def execute_custom_calculation(table: pd.DataFrame, calculation_code: str, metric_name: str = "custom_metric") -> dict:
+    """
+    Execute custom Python calculation on DataFrame
+    
+    Args:
+        table: DataFrame to operate on
+        calculation_code: Python code string that operates on 'df' variable
+        metric_name: Name for the resulting metric
+    
+    Returns:
+        dict: Custom calculation result
+    
+    Example:
+        code = "result = df.groupby('customer_email')['total_amount'].sum().mean()"
+        execute_custom_calculation(orders_df, code, "avg_customer_value")
+    """
+    try:
+        # Validate input
+        if table.empty:
+            return {
+                metric_name: None,
+                "error": "Empty DataFrame provided",
+                "calculation_code": calculation_code,
+                "success": False
+            }
+        
+        # Create safe execution environment
+        import math
+        local_vars = {
+            'df': table.copy(),
+            'pd': pd,
+            'np': np,
+            'math': math,
+            'datetime': datetime,
+            'result': None
+        }
+        
+        # Restricted builtins to prevent dangerous operations
+        safe_builtins = {
+            'len': len,
+            'max': max,
+            'min': min,
+            'sum': sum,
+            'abs': abs,
+            'round': round,
+            'sorted': sorted,
+            'enumerate': enumerate,
+            'range': range,
+            'zip': zip,
+            'any': any,
+            'all': all,
+            'bool': bool,
+            'int': int,
+            'float': float,
+            'str': str,
+            'list': list,
+            'dict': dict,
+            'set': set,
+            'tuple': tuple
+        }
+        
+        # Execute the custom code with restricted environment
+        exec(calculation_code, {"__builtins__": safe_builtins}, local_vars)
+        
+        # Get the result (code should assign to 'result' variable)
+        result = local_vars.get('result', None)
+        
+        if result is None:
+            return {
+                metric_name: None,
+                "error": "No 'result' variable found in calculation code",
+                "calculation_code": calculation_code,
+                "success": False
+            }
+        
+        # Convert numpy/pandas types to native Python types for JSON serialization
+        if hasattr(result, 'tolist'):
+            result = result.tolist()
+        elif hasattr(result, 'to_dict'):
+            result = result.to_dict()
+        elif isinstance(result, (np.int64, np.int32, np.float64, np.float32)):
+            result = result.item()
+        
+        return {
+            metric_name: result,
+            "calculation_code": calculation_code,
+            "success": True
+        }
+        
+    except Exception as e:
+        return {
+            metric_name: None,
+            "error": f"Calculation error: {str(e)}",
+            "calculation_code": calculation_code,
+            "success": False
+        }
+
 def get_geographic_insights(table: pd.DataFrame, top_n: int = 5) -> dict:
     """Get geographic distribution insights"""
     try:
@@ -573,6 +670,94 @@ def get_geographic_insights(table: pd.DataFrame, top_n: int = 5) -> dict:
     except Exception as e:
         print(f"Error in calculating geographic insights: {e}")
         return None
+
+
+def execute_custom_calculation(table: pd.DataFrame, calculation_code: str, metric_name: str = "custom_metric") -> dict:
+    """
+    Execute custom Python calculation on DataFrame for metrics not available in standard tools
+    
+    Args:
+        table: DataFrame to operate on
+        calculation_code: Python code string that operates on 'df' variable
+        metric_name: Name for the resulting metric
+    
+    Returns:
+        dict: Custom calculation result
+        
+    Security Notes:
+        - Executes in restricted environment with limited builtins
+        - Only pandas, numpy, math, datetime libraries available
+        - Code must assign result to 'result' variable
+        
+    Example calculation_codes:
+        - Revenue per customer: "result = df.groupby('customer_email')['total_amount'].sum().mean()"
+        - Return rate by payment: "result = (df[df['order_status'] == 'Returned'].groupby('payment_mode').size() / df.groupby('payment_mode').size() * 100).to_dict()"
+        - Customer lifetime value: "result = df.groupby('customer_email')['total_amount'].sum().describe().to_dict()"
+        - Weekly growth rate: "weekly_sales = df.groupby(pd.to_datetime(df['order_date']).dt.week)['total_amount'].sum(); result = weekly_sales.pct_change().iloc[-1] * 100 if len(weekly_sales) > 1 else 0"
+    """
+    import math
+    
+    try:
+        if table.empty:
+            return {
+                metric_name: None,
+                "message": "Empty dataset",
+                "calculation_code": calculation_code,
+                "success": True
+            }
+        
+        # Create safe execution environment
+        local_vars = {
+            'df': table.copy(),
+            'pd': pd,
+            'np': np,
+            'math': math,
+            'datetime': datetime
+        }
+        
+        try:
+            # Execute the custom code in restricted environment
+            exec(calculation_code, {"__builtins__": {}}, local_vars)
+        except Exception as exec_error:
+            return {
+                "error": f"Code execution error: {str(exec_error)}",
+                "calculation_code": calculation_code,
+                "success": False
+            }
+        
+        # Get the result (code should assign to 'result' variable)
+        result = local_vars.get('result', None)
+        
+        if result is None:
+            return {
+                "error": "Calculation code must assign final result to 'result' variable",
+                "calculation_code": calculation_code,
+                "success": False
+            }
+        
+        # Convert numpy/pandas types to Python types for JSON serialization
+        if hasattr(result, 'dtype'):
+            if np.issubdtype(result.dtype, np.integer):
+                result = int(result)
+            elif np.issubdtype(result.dtype, np.floating):
+                result = float(result)
+        elif hasattr(result, 'to_dict'):
+            result = result.to_dict()
+        elif hasattr(result, 'tolist'):
+            result = result.tolist()
+        
+        return {
+            metric_name: result,
+            "calculation_code": calculation_code,
+            "success": True
+        }
+        
+    except Exception as e:
+        return {
+            "error": f"Calculation setup error: {str(e)}",
+            "calculation_code": calculation_code,
+            "success": False
+        }
 
 def _fetch_orders_window(start_date: str, end_date: str, api_key: str, jwt_token: str, base_url: str) -> List[Dict]:
     """Fetch all orders for a date window with pagination support"""
@@ -1021,8 +1206,10 @@ def get_schema_info(entity: str = "orders", field: str = None) -> Dict[str, Any]
 # Tool registry mapping
 TOOL_REGISTRY = {
     "get_all_orders": get_all_orders,
+    "apply_filters": apply_filters,  # Enable early filtering optimization
     "get_schema_info": get_schema_info,
     "convert_to_df": convert_to_df,
+    "execute_custom_calculation": execute_custom_calculation,  # Dynamic code generation for custom metrics
     "get_aov": get_aov,
     "get_total_revenue": get_total_revenue,
     "get_order_count": get_order_count,

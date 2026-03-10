@@ -7,6 +7,10 @@ import json
 from datetime import datetime, timedelta
 import re
 
+planningLLM_prompt = """
+
+"""
+
 
 class OpenRouterLLM:
     """Base class for OpenRouter API calls"""
@@ -46,10 +50,38 @@ class OpenRouterLLM:
         except requests.exceptions.RequestException as e:
             print(f"OpenRouter API error: {e}")
             raise
+    
+    def _call_api_with_tools(self, messages: list, tools: list, temperature: float = 0.7) -> dict:
+        """Make API call to OpenRouter with tool calling support"""
+        try:
+            response = requests.post(
+                url=self.base_url,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json", 
+                    "HTTP-Referer": self.site_url,
+                    "X-Title": self.site_name,
+                },
+                data=json.dumps({
+                    "model": self.model,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "tools": tools,
+                    "tool_choice": "auto"
+                })
+            )
+            response.raise_for_status()
+            
+            result = response.json()
+            return result["choices"][0]["message"]
+        
+        except requests.exceptions.RequestException as e:
+            print(f"OpenRouter API error: {e}")
+            raise
 
 
 class PlanningLLM(OpenRouterLLM):
-    """Planning LLM - generates execution plan from natural language query"""
+    """Planning LLM - generates execution plan from natural language query using tool calling"""
     
     def _generate_fallback_summary(self, query: str) -> str:
         """Generate a simple fallback summary when LLM doesn't provide one"""
@@ -71,107 +103,342 @@ class PlanningLLM(OpenRouterLLM):
         else:
             return "Analyze orders data"
     
+    def _get_tool_definitions(self):
+        """Define available tools for the planning LLM"""
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_all_orders",
+                    "description": "Fetch order data for a date range",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "start_date": {"type": "string", "description": "Start date in YYYY-MM-DD HH:MM:SS format"},
+                            "end_date": {"type": "string", "description": "End date in YYYY-MM-DD HH:MM:SS format"}
+                        },
+                        "required": ["start_date", "end_date"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "apply_filters",
+                    "description": "Filter data by conditions (use early for optimization)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "filters": {"type": "array", "description": "List of filter conditions"}
+                        },
+                        "required": ["filters"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_schema_info",
+                    "description": "Get schema/metadata about available fields and constraints",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "entity": {"type": "string", "description": "Entity name (e.g., 'orders')"},
+                            "field": {"type": "string", "description": "Optional: specific field name to get info for"}
+                        },
+                        "required": ["entity"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "convert_to_df",
+                    "description": "Convert fetched JSON data to pandas DataFrame (REQUIRED before any metric calculation)",
+                    "parameters": {"type": "object", "properties": {}, "required": []}
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "execute_custom_calculation",
+                    "description": "Execute custom Python calculations for complex business logic, customer lifetime value, retention rates, growth calculations, time-based metrics, custom ratios, percentages, or derived metrics",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "table": {"type": "object", "description": "DataFrame to operate on"},
+                            "calculation_code": {"type": "string", "description": "Python code string that operates on 'df' variable and assigns result to 'result' variable"},
+                            "metric_name": {"type": "string", "description": "Name for the resulting metric", "default": "custom_metric"}
+                        },
+                        "required": ["table", "calculation_code"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_aov",
+                    "description": "Calculate Average Order Value",
+                    "parameters": {"type": "object", "properties": {}, "required": []}
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_total_revenue",
+                    "description": "Calculate total revenue",
+                    "parameters": {"type": "object", "properties": {}, "required": []}
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_order_count",
+                    "description": "Get total number of orders",
+                    "parameters": {"type": "object", "properties": {}, "required": []}
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_order_status_distribution",
+                    "description": "Get distribution of order statuses",
+                    "parameters": {"type": "object", "properties": {}, "required": []}
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_payment_mode_distribution",
+                    "description": "Distribution of payment modes",
+                    "parameters": {"type": "object", "properties": {}, "required": []}
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_marketplace_distribution",
+                    "description": "Distribution of orders by marketplace",
+                    "parameters": {"type": "object", "properties": {}, "required": []}
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_state_wise_distribution",
+                    "description": "Distribution by state",
+                    "parameters": {"type": "object", "properties": {}, "required": []}
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_city_wise_distribution",
+                    "description": "Distribution by city (top N)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "top_n": {"type": "integer", "description": "Number of top cities to show", "default": 10}
+                        }
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_courier_distribution",
+                    "description": "Distribution of orders by courier service",
+                    "parameters": {"type": "object", "properties": {}, "required": []}
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_average_discount",
+                    "description": "Calculate average discount amount",
+                    "parameters": {"type": "object", "properties": {}, "required": []}
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_average_shipping_charge",
+                    "description": "Calculate average shipping charges",
+                    "parameters": {"type": "object", "properties": {}, "required": []}
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_average_tax",
+                    "description": "Calculate average tax amount",
+                    "parameters": {"type": "object", "properties": {}, "required": []}
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_statistical_summary",
+                    "description": "Get comprehensive statistical summary (mean, median, std, quartiles) for a numeric field",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "field": {"type": "string", "description": "Numeric field name to analyze"}
+                        },
+                        "required": ["field"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_percentile",
+                    "description": "Get specific percentile for a numeric field",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "field": {"type": "string", "description": "Numeric field name"},
+                            "percentile": {"type": "number", "description": "Percentile value (0-100)"}
+                        },
+                        "required": ["field", "percentile"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_top_percentile",
+                    "description": "Get records in top percentile for a field and their metrics",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "field": {"type": "string", "description": "Field name to analyze"},
+                            "percentile": {"type": "number", "description": "Percentile threshold (default: 95)", "default": 95}
+                        },
+                        "required": ["field"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_bottom_percentile",
+                    "description": "Get records in bottom percentile for a field and their metrics",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "field": {"type": "string", "description": "Field name to analyze"},
+                            "percentile": {"type": "number", "description": "Percentile threshold (default: 5)", "default": 5}
+                        },
+                        "required": ["field"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_correlation_matrix",
+                    "description": "Calculate correlation matrix between numeric fields",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "fields": {"type": "array", "items": {"type": "string"}, "description": "List of numeric field names to correlate"}
+                        },
+                        "required": ["fields"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_conversion_rate",
+                    "description": "Calculate order conversion/delivery success rate",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "success_status": {"type": "string", "description": "Status considered successful (default: 'Delivered')", "default": "Delivered"}
+                        }
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_cod_vs_prepaid_metrics",
+                    "description": "Compare COD vs PrePaid performance with counts, revenue, and AOV",
+                    "parameters": {"type": "object", "properties": {}, "required": []}
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_geographic_insights",
+                    "description": "Get geographic distribution insights including top states/cities by orders and revenue",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "top_n": {"type": "integer", "description": "Number of top regions to show (default: 5)", "default": 5}
+                        }
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_common_metrics",
+                    "description": "Calculate standard business metrics (AOV, revenue, count, distributions) when no specific metrics are requested",
+                    "parameters": {"type": "object", "properties": {}, "required": []}
+                }
+            }
+        ]
+        
+        # Debug: Print tool definitions
+        print(f"[DEBUG] Tool definitions count: {len(tools)}")
+        print(f"[DEBUG] Tool names: {[tool['function']['name'] for tool in tools]}")
+        
+        return tools
+
     def invoke(self, query: str) -> dict:
-        """Generate execution plan from query"""
+        """Generate execution plan from query with enhanced debugging"""
         from datetime import datetime, timedelta
         current_date = datetime.now().strftime("%Y-%m-%d")
         
-        # Calculate some date examples for the LLM
+        # Calculate date examples for the LLM
         today = datetime.now()
         yesterday = today - timedelta(days=1)
         five_days_ago = today - timedelta(days=5)
         
-        prompt = f"""You are a query planning assistant for an e-commerce order management system.
+        # Enhanced prompt with FORMAT EXAMPLES for tool calling
+        prompt = f""" You are a query planning assistant for an e-commerce order management system.
 Today's date is {current_date}.
-
-CRITICAL: When generating dates in JSON responses, always use actual date values in YYYY-MM-DD HH:MM:SS format.
-- For "last 5 days": Calculate actual dates like "{five_days_ago.strftime('%Y-%m-%d %H:%M:%S')}" to "{today.strftime('%Y-%m-%d')} 23:59:59"
-- For "yesterday": Use actual yesterday date like "{yesterday.strftime('%Y-%m-%d')} 00:00:00" to "{yesterday.strftime('%Y-%m-%d')} 23:59:59"
-- NEVER use placeholder text like 'YYYY-MM-DD HH:MM:SS' - always calculate real dates
+CRITICAL: Always use actual dates in YYYY-MM-DD HH:MM:SS format, never placeholders.
+- "last 5 days": "{five_days_ago.strftime('%Y-%m-%d')} 00:00:00" to "{today.strftime('%Y-%m-%d')} 23:59:59"
+- "yesterday": "{yesterday.strftime('%Y-%m-%d')} 00:00:00" to "{yesterday.strftime('%Y-%m-%d')} 23:59:59"
+- For chupps.com → "marketplace": "Shopify"
 
 User Query: "{query}"
+IMPORTANT: You MUST respond with a JSON object, NOT function calls. The available functions are for reference only.
 
-Available Tools:
-1. get_all_orders_recent - Fetch order data for a date range
-2. get_schema_info - Get schema/metadata about available fields and constraints
-   - Optional param "field": Specify a field name (e.g., "payment_mode") to get only that field's info
-   - Without "field": Returns complete schema for all fields
-3. convert_to_df - Convert fetched JSON data to pandas DataFrame (REQUIRED before any metric calculation)
-4. METRIC TOOLS (use after convert_to_df):
-   - get_aov - Calculate Average Order Value
-   - get_total_revenue - Calculate total revenue 
-   - get_order_count - Get total number of orders
-   - get_order_status_distribution - Distribution of order statuses
-   - get_payment_mode_distribution - Distribution of payment modes (COD vs PrePaid)
-   - get_marketplace_distribution - Distribution by marketplace
-   - get_state_wise_distribution - Distribution by state
-   - get_city_wise_distribution - Distribution by city (top N)
-   - get_courier_distribution - Distribution by courier service
-   - get_average_discount - Average discount amount
-   - get_average_shipping_charge - Average shipping charges
-   - get_average_tax - Average tax amount
-5. STATISTICAL TOOLS:
-   - get_statistical_summary - Comprehensive stats (mean, median, std, quartiles) for numeric field
-   - get_percentile - Get specific percentile for a field
-   - get_top_percentile - Get top N% records and their metrics
-   - get_bottom_percentile - Get bottom N% records and their metrics
-   - get_correlation_matrix - Calculate correlation between numeric fields
-6. BUSINESS INTELLIGENCE TOOLS:
-   - get_conversion_rate - Calculate delivery success rate
-   - get_cod_vs_prepaid_metrics - Compare COD vs PrePaid performance
-   - get_geographic_insights - Get geographic distribution insights
-   - get_common_metrics - Calculate standard business metrics when no specific metrics are requested
-
-Your task is to create an execution plan in JSON format. Analyze the query and determine:
-1. Query Type:
-   - "schema_discovery": If asking about available fields, data structure, allowed values, date ranges, etc.
-   - "comparison": If comparing two or more groups (marketplaces, payment modes, states, etc.)
-   - "metric_analysis": If asking for specific metrics like AOV, revenue, distributions, statistical analysis
-   - "standard": Regular data fetch with optional filtering
-
-2. Tool Selection:
-   - Use "get_schema_info" for questions about data structure, available fields, enum values, constraints
-     * If asking about a SPECIFIC field (e.g., "what are allowed values for payment_mode"), include "field" parameter
-     * If asking generally (e.g., "what fields are available"), omit "field" parameter
-   - Use "get_all_orders" for actual data queries
-   - ALWAYS use "convert_to_df" after getting data and before any metric calculations
-   - Use appropriate metric/statistical tools based on the query
-
-3. Extract date range (for data queries only - convert relative dates like "last 5 days" to absolute dates)
-
-4. Determine if filtering/manipulation is needed after fetching data
-
-IMPORTANT WORKFLOW FOR METRIC QUERIES:
-1. get_all_orders (with date range)
-2. convert_to_df (convert to DataFrame) 
-3. Apply filtering if needed
-4. Use appropriate metric tools
-
-IMPORTANT: Always use actual dates in YYYY-MM-DD HH:MM:SS format, never use placeholder text like 'YYYY-MM-DD HH:MM:SS'. When asked for chupps.com -> "marketplace": "Shopify",
-CRITICAL REQUIREMENT: EVERY JSON response MUST include a "summarized_query" field at the top level with 4-5 words summarizing the user query.
-
-Return ONLY a valid JSON object with this structure:
-
-For metric analysis queries:
+REQUIRED JSON OUTPUT FORMAT:
 {{
-  "summarized_query": "Calculate metrics for recent orders",
-  "query_type": "metric_analysis",
+  "summarized_query": "4-5 word summary",
+  "query_type": "metric_analysis|schema_discovery|standard|comparison",
   "steps": [
     {{
       "id": "step1",
       "tool": "get_all_orders",
       "params": {{
-        "start_date": "2026-02-28 00:00:00",
-        "end_date": "2026-03-05 23:59:59"
+        "start_date": "2026-03-05 00:00:00",
+        "end_date": "2026-03-10 23:59:59"
       }},
       "depends_on": [],
-      "save_as": "orders_data"
+      "save_as": "orders_raw"
     }},
     {{
-      "id": "step2",
+      "id": "step2", 
       "tool": "convert_to_df",
       "params": {{
-        "raw": "{{orders_data}}"
+        "raw": "{{{{orders_raw}}}}"
       }},
       "depends_on": ["step1"],
       "save_as": "orders_df"
@@ -180,142 +447,130 @@ For metric analysis queries:
       "id": "step3",
       "tool": "get_aov",
       "params": {{
-        "table": "{{orders_df}}"
+        "table": "{{{{orders_df}}}}"
       }},
       "depends_on": ["step2"],
       "save_as": "aov_result"
     }}
   ],
   "manipulation": {{
-    "required": false,
-    "type": null
+    "required": true|false,
+    "type": "filter"|null
   }},
   "base_params": {{
-    "start_date": "2026-02-28 00:00:00",
-    "end_date": "2026-03-05 23:59:59"
+    "start_date": "actual date",
+    "end_date": "actual date"
   }},
   "tool": "get_all_orders"
 }}
 
-For schema discovery queries (specific field):
-{{
-  "summarized_query": "Get field constraints and allowed values",
-  "query_type": "schema_discovery",
-  "steps": [
-    {{
-      "id": "step1",
-      "tool": "get_schema_info",
-      "params": {{
-        "entity": "orders",
-        "field": "payment_mode"
-      }},
-      "depends_on": [],
-      "save_as": "schema_info"
-    }}
-  ],
-  "manipulation": {{
-    "required": false,
-    "type": null
-  }},
-  "base_params": {{}},
-  "tool": "get_schema_info"
-}}
+OPTIMIZATION STRATEGIES:
+1. **COMPREHENSIVE ANALYSIS**: Include related metrics (COD→get_cod_vs_prepaid_metrics, Revenue→get_aov+get_order_count+get_total_revenue)
+2. **EARLY FILTERING**: Use apply_filters before convert_to_df for large datasets  
+3. **CUSTOM METRICS**: Use execute_custom_calculation for complex business logic not available in standard tools
 
-For schema discovery queries (all fields):
-{{
-  "summarized_query": "Explore available data fields and structure",
-  "query_type": "schema_discovery",
-  "steps": [
-    {{
-      "id": "step1",
-      "tool": "get_schema_info",
-      "params": {{
-        "entity": "orders"
-      }},
-      "depends_on": [],
-      "save_as": "schema_info"
-    }}
-  ],
-  "manipulation": {{
-    "required": false,
-    "type": null
-  }},
-  "base_params": {{}},
-  "tool": "get_schema_info"
-}}
+WORKFLOW: get_all_orders → convert_to_df → apply_filters (if needed) → metric tools
 
-For data queries (standard or comparison):
-{{
-  "summarized_query": "Retrieve orders data with optional filtering",
-  "query_type": "standard" or "comparison",
-  "steps": [
-    {{
-      "id": "step1",
-      "tool": "get_all_orders",
-      "params": {{
-        "start_date": "2026-02-23 00:00:00",
-        "end_date": "2026-03-05 23:59:59"
-      }},
-      "depends_on": [],
-      "save_as": "orders_data"
-    }}
-  ],
-  "manipulation": {{
-    "required": true or false,
-    "type": "filter"
-  }},
-  "base_params": {{
-    "start_date": "2026-02-23 00:00:00",
-    "end_date": "2026-03-05 23:59:59"
-  }},
-  "tool": "get_all_orders"
-}}
+Query Types:
+- "schema_discovery": Data structure/field questions
+- "comparison": Comparing groups (marketplaces, payment modes, etc.)  
+- "metric_analysis": Specific metrics (AOV, revenue, distributions)
+- "standard": Regular data fetch with optional filtering
 
-Examples:
-- "last 5 days" = start_date: "2026-02-28 00:00:00", end_date: "2026-03-05 23:59:59"
-- "last week" = start_date: "2026-02-26 00:00:00", end_date: "2026-03-05 23:59:59"
-- "yesterday" = start_date: "2026-03-04 00:00:00", end_date: "2026-03-04 23:59:59"
-- "today" = start_date: "2026-03-05 00:00:00", end_date: "2026-03-05 23:59:59"
+CRITICAL: Every response MUST include "summarized_query" field with 4-5 word summary.
+Return ONLY the JSON object with the structure based on query type.
 """
 
-        response = self._call_api([{"role": "user", "content": prompt}], temperature=0.3)
+        tools = self._get_tool_definitions()
+        
+        # Debug: Print request details
+        print(f"\\n[DEBUG] ===== TOOL CALLING PLANNING LLM DEBUG =====")
+        print(f"[DEBUG] Query: {query}")
+        print(f"[DEBUG] Tools being passed: {len(tools)} tools")
+        print(f"[DEBUG] Calling API with tools...")
+        
+        response = self._call_api_with_tools([{"role": "user", "content": prompt}], tools, temperature=0.3)
         
         # Debug: Print raw LLM response
-        print(f"[DEBUG] Raw LLM response: {response[:200]}...")
+        print(f"[DEBUG] Raw LLM response keys: {list(response.keys()) if isinstance(response, dict) else 'Not a dict'}")
+        print(f"[DEBUG] Raw LLM response: {str(response)[:300]}...")
         
         try:
-            # Extract JSON from response (in case LLM adds extra text)
-            json_start = response.find('{')
-            json_end = response.rfind('}') + 1
-            if json_start >= 0 and json_end > json_start:
-                response = response[json_start:json_end]
+            # Handle tool calling response format
+            response_content = response.get("content", "")
+            tool_calls = response.get("tool_calls", [])
             
-            print(f"[DEBUG] Extracted JSON: {response[:200]}...")
+            print(f"[DEBUG] Response content length: {len(response_content) if response_content else 0}")
+            print(f"[DEBUG] Tool calls count: {len(tool_calls)}")
             
-            plan_data = json.loads(response)
-            print(f"[DEBUG] Parsed plan_data keys: {list(plan_data.keys())}")
-            
-            # Extract summarized_query and remove it from plan_data
-            summarized_query = plan_data.pop("summarized_query", "")
-            print(f"[DEBUG] Extracted summarized_query: '{summarized_query}'")
-            
-            # If summarized_query is empty, try to generate a fallback
-            if not summarized_query:
-                # Generate a simple fallback from the user query
-                summarized_query = self._generate_fallback_summary(query)
-                print(f"[DEBUG] Generated fallback: '{summarized_query}'", flush=True)
-            
-            return {
-                "success": True,
-                "plan": plan_data,
-                "summarized_query": summarized_query
-            }
+            if response_content:
+                # Extract JSON from content response
+                json_start = response_content.find('{')
+                json_end = response_content.rfind('}') + 1
+                if json_start >= 0 and json_end > json_start:
+                    json_content = response_content[json_start:json_end]
+                else:
+                    json_content = response_content
+                
+                print(f"[DEBUG] Extracted JSON (first 200 chars): {json_content[:200]}...")
+                
+                plan_data = json.loads(json_content)
+                print(f"[DEBUG] Successfully parsed JSON with keys: {list(plan_data.keys())}")
+                
+                # Extract summarized_query and remove it from plan_data
+                summarized_query = plan_data.pop("summarized_query", "")
+                print(f"[DEBUG] Extracted summarized_query: '{summarized_query}'")
+                
+                # If summarized_query is empty, generate a fallback
+                if not summarized_query:
+                    summarized_query = self._generate_fallback_summary(query)
+                    print(f"[DEBUG] Generated fallback summary: '{summarized_query}'")
+                
+                return {
+                    "success": True,
+                    "plan": plan_data,
+                    "summarized_query": summarized_query
+                }
+            elif tool_calls:
+                print(f"[DEBUG] Unexpected tool calls in response: {tool_calls}")
+                return {
+                    "success": False,
+                    "error": "LLM tried to call tools instead of returning JSON"
+                }
+            else:
+                print(f"[DEBUG] No content or tool calls found in response")
+                return {
+                    "success": False,
+                    "error": "No content or tool calls in response"
+                }
+                    
         except json.JSONDecodeError as e:
-            print(f"Failed to parse plan JSON: {e}\nResponse: {response}")
+            print(f"[ERROR] Failed to parse plan JSON: {e}")
+            print(f"[ERROR] Response content: {response}")
             return {
                 "success": False,
                 "error": f"Failed to parse plan: {str(e)}"
             }
+        except Exception as e:
+            print(f"[ERROR] Error processing response: {e}")
+            return {
+                "success": False,
+                "error": f"Error processing response: {str(e)}"
+            }
+            {
+                "type": "function",
+                "function": {
+                    "name": "apply_filters",
+                    "description": "Filter data by conditions (use early for optimization)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "filters": {"type": "array", "description": "List of filter conditions"}
+                        },
+                        "required": ["filters"]
+                    }
+                }
+            },
 
 
 class FilteringLLM(OpenRouterLLM):
@@ -508,9 +763,9 @@ If conversion rates are included, comment on business performance.
 IMPORTANT: Format your response in Markdown. Use bullet points for each insight.
 Strictly use this exact format:
 
-- **[Bold title/metric]:** [detailed explanation with specific numbers]
-- **[Bold title/metric]:** [detailed explanation with specific numbers]
-- **[Bold title/metric]:** [detailed explanation with specific numbers]
+- **Bold title/metric:** [detailed explanation with specific numbers]
+- **Bold title/metric:** [detailed explanation with specific numbers]
+- **Bold title/metric:** [detailed explanation with specific numbers]
 
 Example:
 - **Order Volume Leadership:** Maharashtra recorded 505 orders, significantly outperforming Telangana's 154 orders by 69.5%
@@ -793,7 +1048,8 @@ class InsightLLM(OpenRouterLLM):
         return any(keyword in query.lower() for keyword in context_keywords)
 
 
-# Singleton instances
+#provide RAG business logic to both - Metric & Insight LLM
+
 planning_llm = PlanningLLM()
 filtering_llm = FilteringLLM()
 grouping_llm = GroupingLLM()

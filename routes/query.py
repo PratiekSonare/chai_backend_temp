@@ -169,7 +169,8 @@ async def process_query(request: QueryRequest):
                         "query": final_data["query"],
                         "metrics": final_data["metrics"],
                         "analysis": final_data["analysis"],
-                        "metrics_calculated": final_data.get("metrics_calculated", [])
+                        "metrics_calculated": final_data.get("metrics_calculated", []),
+                        "plan": final_data["plan"]
                     }
                 elif query_type == "schema_discovery" and isinstance(final_data, dict):
                     # Schema discovery response
