@@ -3,6 +3,7 @@ import numpy as np
 from fastapi import APIRouter, HTTPException
 from datetime import datetime
 from models import OrdersMetricsRequest
+from utils.type_converters import convert_numpy_types
 
 router = APIRouter()
 
@@ -79,7 +80,7 @@ def calculate_orders_metrics(request: OrdersMetricsRequest):
             unique_skus_ordered = 0
         
         # State-wise order count
-        state_wise_orders = df['state'].value_counts().to_dict() if 'state' in df.columns else {}
+        state_wise_orders = convert_numpy_types(df['state'].value_counts().to_dict()) if 'state' in df.columns else {}
         
         volume_metrics = {
             "total_orders": int(total_orders),
@@ -110,7 +111,7 @@ def calculate_orders_metrics(request: OrdersMetricsRequest):
         }
         
         # ============ PAYMENT METRICS ============
-        payment_breakdown = df['payment_mode'].value_counts().to_dict() if 'payment_mode' in df.columns else {}
+        payment_breakdown = convert_numpy_types(df['payment_mode'].value_counts().to_dict()) if 'payment_mode' in df.columns else {}
         cod_orders = payment_breakdown.get('COD', 0)
         prepaid_orders = sum(count for mode, count in payment_breakdown.items() if mode != 'COD')
         
@@ -176,9 +177,9 @@ def calculate_orders_metrics(request: OrdersMetricsRequest):
                         qc_time = (pd.to_datetime(history['qc_pass_datetime']) - pd.to_datetime(history['inventory_assigned_datetime'])).total_seconds() / 3600
                         processing_times.setdefault('qc_times', []).append(qc_time)
         
-        avg_inventory_time = np.mean(processing_times.get('inventory_assignment_times', [0])) if processing_times.get('inventory_assignment_times') else 0
-        avg_qc_time = np.mean(processing_times.get('qc_times', [0])) if processing_times.get('qc_times') else 0
-        avg_processing_time = avg_inventory_time + avg_qc_time
+        avg_inventory_time = float(np.mean(processing_times.get('inventory_assignment_times', [0]))) if processing_times.get('inventory_assignment_times') else 0.0
+        avg_qc_time = float(np.mean(processing_times.get('qc_times', [0]))) if processing_times.get('qc_times') else 0.0
+        avg_processing_time = float(avg_inventory_time + avg_qc_time)
         
         time_based_metrics = {
             "day_wise_frequency": {str(k): int(v) for k, v in day_wise_frequency.items()},
@@ -226,7 +227,7 @@ def calculate_orders_metrics(request: OrdersMetricsRequest):
         }
         
         # ============ SUMMARY RESPONSE ============
-        return {
+        return convert_numpy_types({
             "success": True,
             "total_orders_analyzed": int(total_orders),
             "analysis_timestamp": datetime.now().isoformat(),
@@ -239,7 +240,7 @@ def calculate_orders_metrics(request: OrdersMetricsRequest):
                 "geographic_metrics": geographic_metrics,
                 "product_metrics": product_metrics
             }
-        }
+        })
         
     except Exception as e:
         raise HTTPException(
@@ -274,7 +275,7 @@ def volume_count(request: OrdersMetricsRequest):
             df = df.dropna(subset=['order_date'])
         
         if df.empty:
-            return {
+            return convert_numpy_types({
                 "success": True,
                 "chart_type": "daily",
                 "labels": [],
@@ -282,7 +283,7 @@ def volume_count(request: OrdersMetricsRequest):
                     "order_count": [],
                     "unique_sku_count": []
                 }
-            }
+            })
         
         # Flatten suborders data for SKU analysis
         suborders_list = []
@@ -357,7 +358,7 @@ def volume_count(request: OrdersMetricsRequest):
             order_counts.append(int(grouped_orders[date_group]))
             sku_counts.append(int(grouped_skus.get(date_group, 0)))
         
-        return {
+        return convert_numpy_types({
             "success": True,
             "chart_type": chart_type,
             "labels": labels,
@@ -369,7 +370,7 @@ def volume_count(request: OrdersMetricsRequest):
             "total_orders": int(len(df)),
             "total_unique_skus": int(suborders_df['sku'].nunique() if not suborders_df.empty else 0),
             "date_range_days": int(date_range_days)
-        }
+        })
         
     except Exception as e:
         raise HTTPException(

@@ -7,10 +7,6 @@ import json
 from datetime import datetime, timedelta
 import re
 
-planningLLM_prompt = """
-
-"""
-
 
 class OpenRouterLLM:
     """Base class for OpenRouter API calls"""
@@ -417,7 +413,6 @@ CRITICAL: Always use actual dates in YYYY-MM-DD HH:MM:SS format, never placehold
 - For chupps.com → "marketplace": "Shopify"
 
 User Query: "{query}"
-IMPORTANT: You MUST respond with a JSON object, NOT function calls. The available functions are for reference only.
 
 REQUIRED JSON OUTPUT FORMAT:
 {{
@@ -469,15 +464,17 @@ OPTIMIZATION STRATEGIES:
 2. **EARLY FILTERING**: Use apply_filters before convert_to_df for large datasets  
 3. **CUSTOM METRICS**: Use execute_custom_calculation for complex business logic not available in standard tools
 
-WORKFLOW: get_all_orders → convert_to_df → apply_filters (if needed) → metric tools
-
 Query Types:
 - "schema_discovery": Data structure/field questions
 - "comparison": Comparing groups (marketplaces, payment modes, etc.)  
 - "metric_analysis": Specific metrics (AOV, revenue, distributions)
 - "standard": Regular data fetch with optional filtering
 
-CRITICAL: Every response MUST include "summarized_query" field with 4-5 word summary.
+IMPORTANT RULES: 
+1. You MUST respond with a JSON object, NOT function calls. The available functions are for reference only. 
+2. Every response MUST include "summarized_query" field with 4-5 word summary.
+3. Use convert_to_df only when calculation / manipulation involved. If simple fetching of orders asked, then no need.
+
 Return ONLY the JSON object with the structure based on query type.
 """
 
@@ -557,21 +554,6 @@ Return ONLY the JSON object with the structure based on query type.
                 "success": False,
                 "error": f"Error processing response: {str(e)}"
             }
-            {
-                "type": "function",
-                "function": {
-                    "name": "apply_filters",
-                    "description": "Filter data by conditions (use early for optimization)",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "filters": {"type": "array", "description": "List of filter conditions"}
-                        },
-                        "required": ["filters"]
-                    }
-                }
-            },
-
 
 class FilteringLLM(OpenRouterLLM):
     """Filtering LLM - extracts filter parameters from natural language"""

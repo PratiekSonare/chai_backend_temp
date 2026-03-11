@@ -7,3 +7,4 @@ langgraph
 langchain-core
 redis
 pandas
+boto3

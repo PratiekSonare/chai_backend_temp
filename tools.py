@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 import json
 import boto3
+from utils.type_converters import convert_numpy_types
 
 s3 = boto3.client('s3')
 
@@ -158,7 +159,8 @@ def get_aov(table: pd.DataFrame) -> float:
         if table.empty:
             return 0.0
         aov = table['total_amount'].astype(float).mean()
-        return round(aov, 2) if not pd.isna(aov) else 0.0
+        result = round(aov, 2) if not pd.isna(aov) else 0.0
+        return convert_numpy_types(result)
     except Exception as e:
         print(f"Error in calculating AOV: {e}")
         return None
@@ -170,7 +172,8 @@ def get_total_revenue(table: pd.DataFrame) -> float:
         if table.empty:
             return 0.0
         revenue = table['total_amount'].astype(float).sum()
-        return round(revenue, 2) if not pd.isna(revenue) else 0.0
+        result = round(revenue, 2) if not pd.isna(revenue) else 0.0
+        return convert_numpy_types(result)
     except Exception as e:
         print(f"Error in calculating total revenue: {e}")
         return None
@@ -191,7 +194,7 @@ def get_order_status_distribution(table: pd.DataFrame) -> dict:
         if table.empty or 'order_status' not in table.columns:
             return {}
         distribution = table['order_status'].value_counts().to_dict()
-        return distribution
+        return convert_numpy_types(distribution)
     except Exception as e:
         print(f"Error in calculating order status distribution: {e}")
         return None
@@ -203,7 +206,7 @@ def get_payment_mode_distribution(table: pd.DataFrame) -> dict:
         if table.empty or 'payment_mode' not in table.columns:
             return {}
         distribution = table['payment_mode'].value_counts().to_dict()
-        return distribution
+        return convert_numpy_types(distribution)
     except Exception as e:
         print(f"Error in calculating payment mode distribution: {e}")
         return None
@@ -215,7 +218,7 @@ def get_marketplace_distribution(table: pd.DataFrame) -> dict:
         if table.empty or 'marketplace' not in table.columns:
             return {}
         distribution = table['marketplace'].value_counts().to_dict()
-        return distribution
+        return convert_numpy_types(distribution)
     except Exception as e:
         print(f"Error in calculating marketplace distribution: {e}")
         return None
@@ -227,7 +230,7 @@ def get_state_wise_distribution(table: pd.DataFrame) -> dict:
         if table.empty or 'state' not in table.columns:
             return {}
         distribution = table['state'].value_counts().to_dict()
-        return distribution
+        return convert_numpy_types(distribution)
     except Exception as e:
         print(f"Error in calculating state distribution: {e}")
         return None
@@ -239,7 +242,7 @@ def get_city_wise_distribution(table: pd.DataFrame, top_n: int = 10) -> dict:
         if table.empty or 'city' not in table.columns:
             return {}
         distribution = table['city'].value_counts().head(top_n).to_dict()
-        return distribution
+        return convert_numpy_types(distribution)
     except Exception as e:
         print(f"Error in calculating city distribution: {e}")
         return None
@@ -251,7 +254,7 @@ def get_courier_distribution(table: pd.DataFrame) -> dict:
         if table.empty or 'courier' not in table.columns:
             return {}
         distribution = table['courier'].value_counts().to_dict()
-        return distribution
+        return convert_numpy_types(distribution)
     except Exception as e:
         print(f"Error in calculating courier distribution: {e}")
         return None
@@ -263,7 +266,8 @@ def get_average_discount(table: pd.DataFrame) -> float:
         if table.empty:
             return 0.0
         avg_discount = table['total_discount'].astype(float).mean()
-        return round(avg_discount, 2) if not pd.isna(avg_discount) else 0.0
+        result = round(avg_discount, 2) if not pd.isna(avg_discount) else 0.0
+        return convert_numpy_types(result)
     except Exception as e:
         print(f"Error in calculating average discount: {e}")
         return None
@@ -275,7 +279,8 @@ def get_average_shipping_charge(table: pd.DataFrame) -> float:
         if table.empty:
             return 0.0
         avg_shipping = table['total_shipping_charge'].astype(float).mean()
-        return round(avg_shipping, 2) if not pd.isna(avg_shipping) else 0.0
+        result = round(avg_shipping, 2) if not pd.isna(avg_shipping) else 0.0
+        return convert_numpy_types(result)
     except Exception as e:
         print(f"Error in calculating average shipping charge: {e}")
         return None
@@ -287,7 +292,8 @@ def get_average_tax(table: pd.DataFrame) -> float:
         if table.empty:
             return 0.0
         avg_tax = table['total_tax'].astype(float).mean()
-        return round(avg_tax, 2) if not pd.isna(avg_tax) else 0.0
+        result = round(avg_tax, 2) if not pd.isna(avg_tax) else 0.0
+        return convert_numpy_types(result)
     except Exception as e:
         print(f"Error in calculating average tax: {e}")
         return None
@@ -322,7 +328,7 @@ def get_statistical_summary(table: pd.DataFrame, field: str) -> dict:
             'q25': round(clean_series.quantile(0.25), 2),
             'q75': round(clean_series.quantile(0.75), 2)
         }
-        return stats
+        return convert_numpy_types(stats)
     except Exception as e:
         print(f"Error in calculating statistical summary for {field}: {e}")
         return None
@@ -341,7 +347,8 @@ def get_percentile(table: pd.DataFrame, field: str, percentile: float) -> float:
             return 0.0
         
         result = clean_series.quantile(percentile / 100)
-        return round(result, 2) if not pd.isna(result) else 0.0
+        final_result = round(result, 2) if not pd.isna(result) else 0.0
+        return convert_numpy_types(final_result)
     except Exception as e:
         print(f"Error in calculating {percentile}th percentile for {field}: {e}")
         return None
@@ -376,12 +383,13 @@ def get_top_percentile(table: pd.DataFrame, field: str, percentile: float = 95) 
                 'total_value': 0.0
             }
         
-        return {
+        result = {
             'threshold': round(threshold, 2),
             'count': len(top_records),
             'percentage': round(len(top_records) / len(table) * 100, 2),
             'total_value': round(pd.to_numeric(top_records[field], errors='coerce').sum(), 2)
         }
+        return convert_numpy_types(result)
     except Exception as e:
         print(f"Error in calculating top {percentile}% for {field}: {e}")
         return None
@@ -416,12 +424,13 @@ def get_bottom_percentile(table: pd.DataFrame, field: str, percentile: float = 5
                 'total_value': 0.0
             }
         
-        return {
+        result = {
             'threshold': round(threshold, 2),
             'count': len(bottom_records),
             'percentage': round(len(bottom_records) / len(table) * 100, 2),
             'total_value': round(pd.to_numeric(bottom_records[field], errors='coerce').sum(), 2)
         }
+        return convert_numpy_types(result)
     except Exception as e:
         print(f"Error in calculating bottom {percentile}% for {field}: {e}")
         return None
@@ -447,7 +456,7 @@ def get_correlation_matrix(table: pd.DataFrame, fields: list) -> dict:
             return {"error": "Insufficient numeric data for correlation calculation"}
         
         corr_matrix = numeric_data.corr().round(3)
-        return corr_matrix.to_dict()
+        return convert_numpy_types(corr_matrix.to_dict())
     except Exception as e:
         print(f"Error in calculating correlation matrix: {e}")
         return None
@@ -465,7 +474,7 @@ def get_conversion_rate(table: pd.DataFrame, success_status: str = 'Delivered') 
             
         successful_orders = len(table[table['order_status'] == success_status])
         conversion_rate = (successful_orders / total_orders) * 100
-        return round(conversion_rate, 2)
+        return convert_numpy_types(round(conversion_rate, 2))
     except Exception as e:
         print(f"Error in calculating conversion rate: {e}")
         return None
@@ -511,7 +520,7 @@ def get_cod_vs_prepaid_metrics(table: pd.DataFrame) -> dict:
                 'avg_order_value': round(prepaid_aov, 2) if not pd.isna(prepaid_aov) else 0.0
             }
         }
-        return metrics
+        return convert_numpy_types(metrics)
     except Exception as e:
         print(f"Error in calculating COD vs PrePaid metrics: {e}")
         return None
@@ -542,7 +551,7 @@ def get_common_metrics(data) -> dict:
             "marketplace_distribution": get_marketplace_distribution(df),
             "total_amount_stats": get_statistical_summary(df, "total_amount")
         }
-        return metrics
+        return convert_numpy_types(metrics)
     except Exception as e:
         print(f"Error in calculating common metrics: {e}")
         return {"error": f"Failed to calculate metrics: {str(e)}"}
@@ -623,13 +632,7 @@ def execute_custom_calculation(table: pd.DataFrame, calculation_code: str, metri
                 "success": False
             }
         
-        # Convert numpy/pandas types to native Python types for JSON serialization
-        if hasattr(result, 'tolist'):
-            result = result.tolist()
-        elif hasattr(result, 'to_dict'):
-            result = result.to_dict()
-        elif isinstance(result, (np.int64, np.int32, np.float64, np.float32)):
-            result = result.item()
+        result = convert_numpy_types(result)
         
         return {
             metric_name: result,
@@ -666,98 +669,10 @@ def get_geographic_insights(table: pd.DataFrame, top_n: int = 5) -> dict:
             'highest_aov_states': state_revenue.nlargest(min(top_n, len(state_revenue)), 'mean')['mean'].to_dict() if state_revenue.empty == False else {},
             'highest_aov_cities': city_revenue.nlargest(min(top_n, len(city_revenue)), 'mean')['mean'].to_dict() if city_revenue.empty == False else {}
         }
-        return insights
+        return convert_numpy_types(insights)
     except Exception as e:
         print(f"Error in calculating geographic insights: {e}")
         return None
-
-
-def execute_custom_calculation(table: pd.DataFrame, calculation_code: str, metric_name: str = "custom_metric") -> dict:
-    """
-    Execute custom Python calculation on DataFrame for metrics not available in standard tools
-    
-    Args:
-        table: DataFrame to operate on
-        calculation_code: Python code string that operates on 'df' variable
-        metric_name: Name for the resulting metric
-    
-    Returns:
-        dict: Custom calculation result
-        
-    Security Notes:
-        - Executes in restricted environment with limited builtins
-        - Only pandas, numpy, math, datetime libraries available
-        - Code must assign result to 'result' variable
-        
-    Example calculation_codes:
-        - Revenue per customer: "result = df.groupby('customer_email')['total_amount'].sum().mean()"
-        - Return rate by payment: "result = (df[df['order_status'] == 'Returned'].groupby('payment_mode').size() / df.groupby('payment_mode').size() * 100).to_dict()"
-        - Customer lifetime value: "result = df.groupby('customer_email')['total_amount'].sum().describe().to_dict()"
-        - Weekly growth rate: "weekly_sales = df.groupby(pd.to_datetime(df['order_date']).dt.week)['total_amount'].sum(); result = weekly_sales.pct_change().iloc[-1] * 100 if len(weekly_sales) > 1 else 0"
-    """
-    import math
-    
-    try:
-        if table.empty:
-            return {
-                metric_name: None,
-                "message": "Empty dataset",
-                "calculation_code": calculation_code,
-                "success": True
-            }
-        
-        # Create safe execution environment
-        local_vars = {
-            'df': table.copy(),
-            'pd': pd,
-            'np': np,
-            'math': math,
-            'datetime': datetime
-        }
-        
-        try:
-            # Execute the custom code in restricted environment
-            exec(calculation_code, {"__builtins__": {}}, local_vars)
-        except Exception as exec_error:
-            return {
-                "error": f"Code execution error: {str(exec_error)}",
-                "calculation_code": calculation_code,
-                "success": False
-            }
-        
-        # Get the result (code should assign to 'result' variable)
-        result = local_vars.get('result', None)
-        
-        if result is None:
-            return {
-                "error": "Calculation code must assign final result to 'result' variable",
-                "calculation_code": calculation_code,
-                "success": False
-            }
-        
-        # Convert numpy/pandas types to Python types for JSON serialization
-        if hasattr(result, 'dtype'):
-            if np.issubdtype(result.dtype, np.integer):
-                result = int(result)
-            elif np.issubdtype(result.dtype, np.floating):
-                result = float(result)
-        elif hasattr(result, 'to_dict'):
-            result = result.to_dict()
-        elif hasattr(result, 'tolist'):
-            result = result.tolist()
-        
-        return {
-            metric_name: result,
-            "calculation_code": calculation_code,
-            "success": True
-        }
-        
-    except Exception as e:
-        return {
-            "error": f"Calculation setup error: {str(e)}",
-            "calculation_code": calculation_code,
-            "success": False
-        }
 
 def _fetch_orders_window(start_date: str, end_date: str, api_key: str, jwt_token: str, base_url: str) -> List[Dict]:
     """Fetch all orders for a date window with pagination support"""

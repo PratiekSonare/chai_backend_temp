@@ -1,6 +1,7 @@
 import pandas as pd
 from fastapi import APIRouter, HTTPException
 from models import OrdersMetricsRequest
+from utils.type_converters import convert_numpy_types
 
 router = APIRouter()
 
@@ -29,7 +30,7 @@ def cancellation_bar_chart(request: OrdersMetricsRequest):
             df = df.dropna(subset=['order_date'])
         
         if df.empty:
-            return {
+            return convert_numpy_types({
                 "success": True,
                 "chart_type": "daily",
                 "labels": [],
@@ -41,7 +42,7 @@ def cancellation_bar_chart(request: OrdersMetricsRequest):
                     "cancelled": 0,
                     "returned": 0
                 }
-            }
+            })
         
         # Expand suborders to get item-level data for cancelled/returned quantities
         expanded_data = []
@@ -120,7 +121,7 @@ def cancellation_bar_chart(request: OrdersMetricsRequest):
         total_cancelled = int(items_df['cancelled_quantity'].sum())
         total_returned = int(items_df['returned_quantity'].sum())
         
-        return {
+        return convert_numpy_types({
             "success": True,
             "chart_type": chart_type,
             "labels": labels,
@@ -134,7 +135,7 @@ def cancellation_bar_chart(request: OrdersMetricsRequest):
             },
             "date_range_days": int(date_range_days),
             "total_orders_analyzed": len(df)
-        }
+        })
         
     except Exception as e:
         raise HTTPException(

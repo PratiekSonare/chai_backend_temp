@@ -1,11 +1,57 @@
 import os
 import uvicorn
+import numpy as np
+import pandas as pd
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.encoders import jsonable_encoder
 from dotenv import load_dotenv
+import json
+from decimal import Decimal
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Custom JSON encoder to handle numpy and pandas types
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, (pd.Series, pd.DataFrame)):
+            return obj.to_dict()
+        elif isinstance(obj, pd.Timestamp):
+            return obj.isoformat()
+        elif isinstance(obj, Decimal):
+            return float(obj)
+        elif hasattr(obj, 'item'):  # numpy scalars
+            return obj.item()
+        elif hasattr(obj, 'tolist'):  # numpy arrays
+            return obj.tolist()
+        return super().default(obj)
+
+# Override FastAPI's JSON response encoder
+def custom_json_encoder(obj):
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, (pd.Series, pd.DataFrame)):
+        return obj.to_dict()
+    elif isinstance(obj, pd.Timestamp):
+        return obj.isoformat()
+    elif isinstance(obj, Decimal):
+        return float(obj)
+    elif hasattr(obj, 'item'):  # numpy scalars
+        return obj.item()
+    elif hasattr(obj, 'tolist'):  # numpy arrays
+        return obj.tolist()
+    return jsonable_encoder(obj)
 
 # Import route modules
 from routes.health import router as health_router
@@ -24,13 +70,46 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Enable CORS for localhost:3000
+# Configure FastAPI to use custom JSON encoder for numpy/pandas types
+from fastapi.responses import JSONResponse
+from fastapi import Request
+import typing
+
+class CustomJSONResponse(JSONResponse):
+    def render(self, content: typing.Any) -> bytes:
+        return json.dumps(
+            content,
+            cls=NumpyEncoder,
+            ensure_ascii=False,
+            allow_nan=False,
+            indent=None,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+# Set default response class
+app.default_response_class = CustomJSONResponse
+
+# Enable CORS for frontend access
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://localhost:3000",
+        "https://127.0.0.1:3000"
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "Content-Type",
+        "Authorization", 
+        "Accept",
+        "Origin",
+        "X-Requested-With",
+        "Access-Control-Request-Method",
+        "Access-Control-Request-Headers"
+    ],
+    expose_headers=["*"]
 )
 
 # Include routers

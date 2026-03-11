@@ -1,6 +1,7 @@
 import pandas as pd
 from fastapi import APIRouter, HTTPException
 from models import OrdersMetricsRequest
+from utils.type_converters import convert_numpy_types
 
 router = APIRouter()
 
@@ -33,7 +34,7 @@ def payment_radial(request: OrdersMetricsRequest):
             df['payment_mode'] = 'Unknown'
         
         if df.empty:
-            return {
+            return convert_numpy_types({
                 "success": True,
                 "chart_type": "daily",
                 "labels": [],
@@ -45,7 +46,7 @@ def payment_radial(request: OrdersMetricsRequest):
                     "cod": 0,
                     "prepaid": 0
                 }
-            }
+            })
         
         # Get date range
         min_date = df['order_date'].min()
@@ -92,7 +93,7 @@ def payment_radial(request: OrdersMetricsRequest):
         total_cod = int(total_payment_breakdown.get('COD', 0))
         total_prepaid = int(sum(count for mode, count in total_payment_breakdown.items() if mode != 'COD'))
         
-        return {
+        return convert_numpy_types({
             "success": True,
             "chart_type": chart_type,
             "labels": labels,
@@ -105,7 +106,7 @@ def payment_radial(request: OrdersMetricsRequest):
                 "prepaid": total_prepaid
             },
             "date_range_days": int(date_range_days)
-        }
+        })
         
     except Exception as e:
         raise HTTPException(

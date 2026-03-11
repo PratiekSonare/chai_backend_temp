@@ -124,6 +124,29 @@ class ConnectionManager:
 # Global connection manager
 manager = ConnectionManager()
 
+def convert_numpy_types(obj):
+    """
+    Recursively convert numpy types to native Python types for JSON serialization
+    """
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {key: convert_numpy_types(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_types(item) for item in obj]
+    elif isinstance(obj, tuple):
+        return tuple(convert_numpy_types(item) for item in obj)
+    elif pd.isna(obj):
+        return None
+    else:
+        return obj
+
 app = FastAPI(
     title="Order Analysis Workflow API",
     description="FastAPI server for processing order analysis queries",
@@ -386,7 +409,7 @@ async def process_query(request: QueryRequest):
             # For comparison queries
             if is_comparison and isinstance(final_data, dict) and "insights" in final_data:
                 await manager.log_request_end(request_id, True, "Comparison analysis completed successfully")
-                return {
+                return convert_numpy_types({
                     "success": True,
                     "query_type": "comparison",
                     "summarized_query": result.get("summarized_query", ""),
@@ -394,12 +417,12 @@ async def process_query(request: QueryRequest):
                     "comparison_data": final_data.get("comparison_data"),
                     "detailed_metrics": final_data.get("detailed_metrics"),
                     "request_id": request_id
-                }
+                })
             
             # For metric analysis queries
             elif isinstance(final_data, dict) and "metrics" in final_data and "analysis" in final_data:
                 await manager.log_request_end(request_id, True, f"Metric analysis completed - calculated {len(final_data.get('metrics_calculated', []))} metrics")
-                return {
+                return convert_numpy_types({
                     "success": True,
                     "query_type": "metric_analysis",
                     "summarized_query": result.get("summarized_query", ""),
@@ -408,13 +431,13 @@ async def process_query(request: QueryRequest):
                     "analysis": final_data["analysis"],
                     "metrics_calculated": final_data.get("metrics_calculated", []),
                     "request_id": request_id
-                }
+                })
             
             # For standard queries
             else:
                 record_count = len(final_data) if isinstance(final_data, list) else 1
                 await manager.log_request_end(request_id, True, f"Query completed successfully - returned {record_count} records")
-                return {
+                return convert_numpy_types({
                     "success": True,
                     "query_type": "standard",
                     "summarized_query": result.get("summarized_query", ""),
@@ -422,7 +445,7 @@ async def process_query(request: QueryRequest):
                     "data": final_data,  # Return all records (removed 100 record limit)
                     "total_records": record_count,
                     "request_id": request_id
-                }
+                })
         
         await manager.log_request_end(request_id, False, error="No result generated")
         raise HTTPException(

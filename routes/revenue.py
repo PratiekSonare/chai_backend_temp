@@ -1,6 +1,7 @@
 import pandas as pd
 from fastapi import APIRouter, HTTPException
 from models import OrdersMetricsRequest
+from utils.type_converters import convert_numpy_types
 
 router = APIRouter()
 
@@ -33,7 +34,7 @@ def revenue_line_chart(request: OrdersMetricsRequest):
             df['total_amount'] = pd.to_numeric(df['total_amount'], errors='coerce').fillna(0)
         
         if df.empty:
-            return {
+            return convert_numpy_types({
                 "success": True,
                 "chart_type": "daily",
                 "labels": [],
@@ -41,7 +42,7 @@ def revenue_line_chart(request: OrdersMetricsRequest):
                     "revenue": [],
                     "aov": []
                 }
-            }
+            })
         
         # Get date range
         min_date = df['order_date'].min()
@@ -91,7 +92,7 @@ def revenue_line_chart(request: OrdersMetricsRequest):
             revenue_data.append(revenue)
             aov_data.append(aov)
         
-        return {
+        return convert_numpy_types({
             "success": True,
             "chart_type": chart_type,
             "labels": labels,
@@ -103,7 +104,7 @@ def revenue_line_chart(request: OrdersMetricsRequest):
             "total_revenue": float(df['total_amount'].sum()),
             "overall_aov": float(df['total_amount'].sum() / len(df)) if len(df) > 0 else 0,
             "date_range_days": int(date_range_days)
-        }
+        })
         
     except Exception as e:
         raise HTTPException(

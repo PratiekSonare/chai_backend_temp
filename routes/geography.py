@@ -1,6 +1,7 @@
 import pandas as pd
 from fastapi import APIRouter, HTTPException
 from models import GeographyRequest
+from utils.type_converters import convert_numpy_types
 
 router = APIRouter()
 
@@ -33,14 +34,14 @@ def pincode_list(request: GeographyRequest):
         state_filtered = df_clean[df_clean['state'].str.lower() == target_state.lower()]
         
         if state_filtered.empty:
-            return {
+            return convert_numpy_types({
                 "success": True,
                 "message": f"No orders found for state: {target_state}",
                 "state": target_state,
                 "pincode_count": 0,
                 "pincodes": [],
                 "pincode_details": {}
-            }
+            })
         
         # Get unique pincodes for the target state
         unique_pincodes = state_filtered['pin_code'].unique().tolist()
@@ -53,7 +54,7 @@ def pincode_list(request: GeographyRequest):
         sorted_pincode_counts = dict(sorted(pincode_order_counts.items(), key=lambda item: item[1], reverse=True))
         unique_pincodes = list(sorted_pincode_counts.keys())
         
-        return {
+        return convert_numpy_types({
             "success": True,
             "state": target_state,
             "pincode_count": pincode_count,
@@ -68,7 +69,7 @@ def pincode_list(request: GeographyRequest):
                 "labels": list(sorted_pincode_counts.keys()),
                 "values": list(sorted_pincode_counts.values())
             }
-        }
+        })
         
     except HTTPException:
         raise

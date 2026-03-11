@@ -1,8 +1,50 @@
 import uuid
+import numpy as np
+import pandas as pd
+from decimal import Decimal
 from fastapi import APIRouter, HTTPException
 from models import QueryRequest
 from workflow import app as workflow_app, AgentState
 from utils.connection_manager import manager
+
+def convert_numpy_types(obj):
+    """Recursively convert numpy types and pandas objects to JSON-serializable types"""
+    if obj is None:
+        return None
+    elif isinstance(obj, (pd.Series, pd.DataFrame)):
+        # Convert DataFrame/Series to dict but handle NaN values
+        result = obj.where(pd.notnull(obj), None).to_dict()
+        return convert_numpy_types(result)  # Recursively clean the dict
+    elif isinstance(obj, (np.integer, int)) and not isinstance(obj, bool):
+        return int(obj)
+    elif isinstance(obj, (np.floating, float)):
+        if np.isnan(obj) or np.isinf(obj):  # Handle NaN and infinity
+            return None
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        # Handle NaN values in arrays
+        result = obj.tolist()
+        return convert_numpy_types(result)  # Recursively clean the list
+    elif isinstance(obj, pd.Timestamp):
+        return obj.isoformat()
+    elif isinstance(obj, Decimal):
+        return float(obj)
+    elif hasattr(obj, 'item'):  # numpy scalars
+        item = obj.item()
+        return convert_numpy_types(item)  # Recursively check the item
+    elif hasattr(obj, 'tolist'):  # numpy arrays
+        result = obj.tolist()
+        return convert_numpy_types(result)  # Recursively clean the list
+    elif isinstance(obj, dict):
+        return {key: convert_numpy_types(value) for key, value in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [convert_numpy_types(item) for item in obj]
+    elif isinstance(obj, float) and (np.isnan(obj) or np.isinf(obj)):
+        return None
+    elif pd.isna(obj):  # Handle individual scalar NaN values (after DataFrame/Series check)
+        return None
+    else:
+        return obj
 
 router = APIRouter()
 
@@ -23,12 +65,19 @@ async def generate_plan(request: QueryRequest):
         from workflow import planner
         result = planner(initial_state)
         
-        return {
+        # Convert any numpy types in the result to JSON-serializable types
+        result = convert_numpy_types(result)
+        
+        response_data = {
             "success": True,
             "query": user_query,
             "plan": result.get("plan", []),
             "is_comparison": result.get("comparison_mode", False)
         }
+        
+        # Convert the entire response as well
+        response_data = convert_numpy_types(response_data)
+        return response_data
         
     except Exception as e:
         raise HTTPException(
@@ -143,6 +192,9 @@ async def process_query(request: QueryRequest):
                 final_data = get_cached_result(result["final_result_ref"])
                 print(f"cached result retrieved, type: {type(final_data)}, length: {len(final_data) if isinstance(final_data, (list, dict)) else 'N/A'}", flush=True)
                 
+                # Convert numpy types to JSON-serializable types
+                final_data = convert_numpy_types(final_data)
+                
                 # Get query type from the plan
                 query_type = result.get("plan", {}).get("query_type", "standard")
                 print(f"query type: {query_type}", flush=True)
@@ -183,16 +235,26 @@ async def process_query(request: QueryRequest):
                     }
                 else:
                     # Standard query response (data list or other)
-                    record_count = len(final_data) if isinstance(final_data, list) else 1
-                    response_data = {
-                        "success": True,
-                        "query_type": "standard",
-                        "request_id": request_id,
-                        "summarized_query": result.get("summarized_query", ""),
-                        "count": record_count,
-                        "data": final_data,
-                        "total_records": record_count
-                    }
+                    # Check if final_data is already a complete response structure
+                    if isinstance(final_data, dict) and "success" in final_data and "data" in final_data:
+                        # final_data is already a complete response, return it directly
+                        response_data = final_data
+                        # Update with current request info if needed
+                        response_data["request_id"] = request_id
+                        if result.get("summarized_query"):
+                            response_data["summarized_query"] = result.get("summarized_query")
+                    else:
+                        # final_data is raw data, wrap it in response structure
+                        record_count = len(final_data) if isinstance(final_data, list) else 1
+                        response_data = {
+                            "success": True,
+                            "query_type": "standard",
+                            "request_id": request_id,
+                            "summarized_query": result.get("summarized_query", ""),
+                            "count": record_count,
+                            "data": final_data,
+                            "total_records": record_count
+                        }
                 
                 print("response constructed successfully", flush=True)
                 
@@ -253,6 +315,8 @@ async def process_query(request: QueryRequest):
             
             try:
                 print(f"returning response_data keys: {list(response_data.keys())}", flush=True)
+                # Convert all numpy types in response data to JSON-serializable types
+                response_data = convert_numpy_types(response_data)
                 return response_data
             except Exception as return_error:
                 print(f"error in return statement: {return_error}", flush=True)
@@ -277,12 +341,18 @@ async def process_query(request: QueryRequest):
                     last_result_ref = result["tool_result_refs"][last_step["save_as"]]
                     final_data = get_cached_result(last_result_ref)
                     
+                    # Convert numpy types to JSON-serializable types
+                    final_data = convert_numpy_types(final_data)
+                    
                     response_data = {
                         "success": True,
                         "request_id": request_id,
                         "data": final_data,
                         "metadata": {"source": "fallback_last_step"}
                     }
+                    
+                    # Convert the entire response data as well
+                    response_data = convert_numpy_types(response_data)
                     
                     print("fallback successful", flush=True)
                     await manager.log_request_end(request_id, False)
