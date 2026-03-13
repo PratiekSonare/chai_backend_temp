@@ -194,7 +194,7 @@ async def test_reasoning_capabilities():
     print("🎉 Testing Complete!")
     print("\nNext Steps:")
     print("1. Start your FastAPI server: python app.py")
-    print("2. Visit http://localhost:5000/docs to explore the new reasoning endpoints")
+    print("2. Visit http://13.126.136.209:5000/docs to explore the new reasoning endpoints")
     print("3. Try the reasoning APIs with complex queries")
     print("4. Check the integration guide: REASONING_INTEGRATION_GUIDE.md")
 

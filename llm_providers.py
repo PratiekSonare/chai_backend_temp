@@ -14,7 +14,7 @@ class OpenRouterLLM:
     def __init__(self):
         self.api_key = os.getenv("OPENROUTER_API_KEY")
         self.model = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
-        self.site_url = os.getenv("OPENROUTER_SITE_URL", "http://localhost:5000")
+        self.site_url = os.getenv("OPENROUTER_SITE_URL", "http://13.126.136.209:5000")
         self.site_name = os.getenv("OPENROUTER_SITE_NAME", "Order Analysis Workflow")
         self.base_url = "https://openrouter.ai/api/v1/chat/completions"
         
@@ -61,6 +61,7 @@ class OpenRouterLLM:
                 data=json.dumps({
                     "model": self.model,
                     "messages": messages,
+                    "reasoning": {"enabled": True},
                     "temperature": temperature,
                     "tools": tools,
                     "tool_choice": "auto"
@@ -554,6 +555,7 @@ Return ONLY the JSON object with the structure based on query type.
                 "success": False,
                 "error": f"Error processing response: {str(e)}"
             }
+
 
 class FilteringLLM(OpenRouterLLM):
     """Filtering LLM - extracts filter parameters from natural language"""

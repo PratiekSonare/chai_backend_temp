@@ -22,7 +22,7 @@ def get_examples():
         },
         "schema_discovery_queries": [
             "What fields are available in the orders data?",
-            "What are the allowed values for payment_mode?",
+             "What are the allowed values for payment_mode?",
             "Which date ranges does this API support?",
             "What marketplaces do we have data for?",
             "Show me the complete data schema",

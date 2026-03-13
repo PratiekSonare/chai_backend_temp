@@ -127,7 +127,8 @@ if __name__ == '__main__':
     # Load environment variables
     host = os.getenv('HOST', '0.0.0.0')
     port = int(os.getenv('PORT', 5000))
-    
+    print("api-key: ", os.getenv('OPENROUTER_API_KEY'))
+
     print(f"\n{'='*60}", flush=True)
     print(f"🚀 Order Analysis Workflow Server (FastAPI)", flush=True)
     print(f"{'='*60}", flush=True)
