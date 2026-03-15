@@ -107,7 +107,9 @@ app.add_middleware(
         "http://localhost:3000",
         "http://127.0.0.1:3000",
         "https://localhost:3000",
-        "https://127.0.0.1:3000"
+        "https://127.0.0.1:3000",
+        "https://www.engineermonke.space",
+        "https://engineermonke.space",
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
