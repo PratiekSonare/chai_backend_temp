@@ -48,7 +48,7 @@ Get your OpenRouter API key from: https://openrouter.ai/keys
 python app.py
 ```
 
-Server will start on `http://localhost:5000`
+Server will start on `https://${process.env.NEXT_PUBLIC_API_URL}`
 
 ## API Endpoints
 
@@ -107,7 +107,7 @@ Process a natural language query
 
 ### Standard Query
 ```bash
-curl -X POST http://localhost:5000/query \
+curl -X POST https://${process.env.NEXT_PUBLIC_API_URL}/query \
   -H "Content-Type: application/json" \
   -d '{
     "query": "Show me orders from last 5 days with payment mode prepaid"
@@ -116,7 +116,7 @@ curl -X POST http://localhost:5000/query \
 
 ### Comparison Query
 ```bash
-curl -X POST http://localhost:5000/query \
+curl -X POST https://${process.env.NEXT_PUBLIC_API_URL}/query \
   -H "Content-Type: application/json" \
   -d '{
     "query": "Compare orders between Shopify13 and Flipkart from the last 10 days"

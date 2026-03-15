@@ -14,7 +14,7 @@ class OpenRouterLLM:
     def __init__(self):
         self.api_key = os.getenv("OPENROUTER_API_KEY")
         self.model = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
-        self.site_url = os.getenv("OPENROUTER_SITE_URL", "http://localhost:5000")
+        self.site_url = os.getenv("OPENROUTER_SITE_URL", "www.engineermonke.space")
         self.site_name = os.getenv("OPENROUTER_SITE_NAME", "Order Analysis Workflow")
         self.base_url = "https://openrouter.ai/api/v1/chat/completions"
         
