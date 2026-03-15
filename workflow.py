@@ -3,10 +3,11 @@ from langgraph.graph import StateGraph, END
 import operator
 import pandas as pd
 import json
+import asyncio
 
 # Import tools and LLM providers
 from tools import TOOL_REGISTRY, apply_filters
-from llm_providers import planning_llm, filtering_llm, grouping_llm, insight_llm, metric_llm
+from llm_providers import planning_llm, filtering_llm, grouping_llm, insight_llm
 
 # State schema
 class AgentState(TypedDict):
@@ -35,9 +36,49 @@ class AgentState(TypedDict):
     # Metric analysis fields
     metric_results: dict | None  # Results from metric calculations
     metric_analysis: str | None  # LLM analysis of metrics
+    metrics_calculated: list[str] | None
 
 # Simple in-memory cache (use Redis for production)
 RESULT_CACHE = {}
+
+
+async def emit_step_event(
+    state: AgentState,
+    step_key: str,
+    summary: str,
+    status: str = "INFO",
+    details: str | None = None,
+    wait_ms: int | None = None,
+) -> None:
+    """Emit workflow event through request-scoped logger if available."""
+    if not state.get("logger"):
+        return
+
+    payload = {
+        "status": status,
+        "details": details,
+    }
+    if wait_ms is not None:
+        payload["wait_ms"] = wait_ms
+
+    await state["logger"](
+        state.get("request_id", "unknown"),
+        step_key,
+        summary,
+        payload,
+    )
+
+
+async def gate_next_step(state: AgentState, next_step: str, wait_ms: int = 500) -> None:
+    """Emit pending event before enforced debounce so frontend can show upcoming step."""
+    await emit_step_event(
+        state,
+        "NEXT_STEP_PENDING",
+        f"{next_step}",
+        status="PENDING",
+        wait_ms=wait_ms,
+    )
+    await asyncio.sleep(wait_ms / 1000)
 
 def cache_result(data: dict | list, key: str) -> str:
     """Cache result and return reference key"""
@@ -175,11 +216,17 @@ def extract_schema_with_enums(data: dict | list, sample_size: int = 100) -> dict
 # Node functions
 async def planning_node(state: AgentState) -> AgentState:
     """Planning LLM generates execution plan"""
-    if state.get("logger"):
-        await state["logger"](state.get("request_id", "unknown"), "PLANNING", f"Query: '{state['user_query'][:60]}...'")
+    await emit_step_event(
+        state,
+        "PLANNING_START",
+        "Planning execution...",
+        status="START",
+        details=f"Query: {state['user_query'][:120]}",
+    )
     
     print(f"🧠 [PLANNING] Query: '{state['user_query'][:60]}...' | Error: {state.get('error', 'None')}", flush=True)
     try:
+        await gate_next_step(state, "Calling planning model...", wait_ms=500)
         # Call your planning LLM here
         plan_response = planning_llm.invoke(state["user_query"])
         
@@ -189,8 +236,12 @@ async def planning_node(state: AgentState) -> AgentState:
                 "error": "Planning failed: " + plan_response.get("error", "Unknown error")
             }
         
-        if state.get("logger"):
-            await state["logger"](state.get("request_id", "unknown"), "PLANNING", f"Plan created: {plan_response['plan'].get('query_type', 'unknown')} query")
+        await emit_step_event(
+            state,
+            "PLANNING_COMPLETE",
+            f"Plan created: {plan_response['plan'].get('query_type', 'unknown')} query",
+            status="COMPLETE",
+        )
         
         print(f"✅ [PLANNING] Plan created: {plan_response['plan'].get('query_type', 'unknown')} query", flush=True)
         
@@ -203,8 +254,13 @@ async def planning_node(state: AgentState) -> AgentState:
         }
     
     except Exception as e:
-        if state.get("logger"):
-            await state["logger"](state.get("request_id", "unknown"), "PLANNING", f"Error: {str(e)}")
+        await emit_step_event(
+            state,
+            "PLANNING_ERROR",
+            "Planning failed",
+            status="ERROR",
+            details=str(e),
+        )
         
         print(f"❌ [PLANNING] Error: {str(e)}", flush=True)
         return {**state, "error": f"Planning error: {str(e)}"}
@@ -226,8 +282,13 @@ async def execute_tool_node(state: AgentState) -> AgentState:
     step_idx = state["current_step_index"]
     total_steps = len(state["plan"]["steps"]) if state["plan"] else 0
     
-    if state.get("logger"):
-        await state["logger"](state.get("request_id", "unknown"), "EXECUTE_TOOL", f"Step {step_idx + 1}/{total_steps} | Retry: {state.get('retry_count', 0)}")
+    await emit_step_event(
+        state,
+        "EXECUTE_STEP_START",
+        f"Step {step_idx + 1}/{total_steps}",
+        status="START",
+        details=f"Retry: {state.get('retry_count', 0)}",
+    )
     
     print(f"🔧 [EXECUTE_TOOL] Step {step_idx + 1}/{total_steps} | Retry: {state.get('retry_count', 0)}", flush=True)
 
@@ -255,6 +316,15 @@ async def execute_tool_node(state: AgentState) -> AgentState:
                 if isinstance(param_value, str) and param_value == f"{{{{{dep_step['save_as']}}}}}":
                     resolved_params[param_key] = dep_data
         
+        # Emit next-step event, wait 500ms, then execute tool.
+        await gate_next_step(state, f"Executing {step['tool']}...", wait_ms=500)
+        await emit_step_event(
+            state,
+            "TOOL_EXECUTION_START",
+            f"Executing {step['tool']}",
+            status="START",
+        )
+
         # Execute tool (map tool name to actual function)
         tool_function = TOOL_REGISTRY.get(step["tool"])
         if not tool_function:
@@ -264,16 +334,31 @@ async def execute_tool_node(state: AgentState) -> AgentState:
         
         # Log successful execution
         if isinstance(result, list):
-            if state.get("logger"):
-                await state["logger"](state.get("request_id", "unknown"), "EXECUTE_TOOL", f"Tool executed: {step['tool']} | Records: {len(result)}")
+            await emit_step_event(
+                state,
+                "TOOL_EXECUTION_COMPLETE",
+                f"Executed {step['tool']}",
+                status="COMPLETE",
+                details=f"Records: {len(result)}",
+            )
             print(f"✅ [EXECUTE_TOOL] Tool executed: {step['tool']} | Records: {len(result)}", flush=True)
         elif isinstance(result, dict) and "available_fields" in result:
-            if state.get("logger"):
-                await state["logger"](state.get("request_id", "unknown"), "EXECUTE_TOOL", f"Tool executed: {step['tool']} | Schema info retrieved")
+            await emit_step_event(
+                state,
+                "TOOL_EXECUTION_COMPLETE",
+                f"Executed {step['tool']}",
+                status="COMPLETE",
+                details="Schema info retrieved",
+            )
             print(f"✅ [EXECUTE_TOOL] Tool executed: {step['tool']} | Schema info retrieved", flush=True)
         else:
-            if state.get("logger"):
-                await state["logger"](state.get("request_id", "unknown"), "EXECUTE_TOOL", f"Tool executed: {step['tool']} | Result type: {type(result).__name__}")
+            await emit_step_event(
+                state,
+                "TOOL_EXECUTION_COMPLETE",
+                f"Executed {step['tool']}",
+                status="COMPLETE",
+                details=f"Result type: {type(result).__name__}",
+            )
             print(f"✅ [EXECUTE_TOOL] Tool executed: {step['tool']} | Result type: {type(result).__name__}", flush=True)
         
         # Cache the actual result data (not in state)
@@ -300,6 +385,13 @@ async def execute_tool_node(state: AgentState) -> AgentState:
         
     except Exception as e:
         # Retry logic
+        await emit_step_event(
+            state,
+            "EXECUTE_STEP_ERROR",
+            "Tool execution error",
+            status="ERROR",
+            details=str(e),
+        )
         if state["retry_count"] < 2:
             return {
                 **state,
@@ -310,14 +402,23 @@ async def execute_tool_node(state: AgentState) -> AgentState:
         print(f"❌ [EXECUTE_TOOL] Error: {str(e)}", flush=True)
         return {**state, "error": f"Tool execution failed: {str(e)}"}
     
-def filtering_node(state: AgentState) -> AgentState:
+async def filtering_node(state: AgentState) -> AgentState:
     """Filtering LLM generates filter parameters using schema with categorical values"""
     print(f"🔍 [FILTERING] Extracting filters from query", flush=True)
     try:
+        await emit_step_event(
+            state,
+            "FILTERING_START",
+            "Preparing filters...",
+            status="START",
+        )
+
         plan = state["plan"]
         # Get schema (not data!) from the last step
         last_step = plan["steps"][-1]
         schema = state["tool_result_schemas"][last_step["save_as"]]
+
+        await gate_next_step(state, "Calling filtering model...", wait_ms=500)
         
         # Call filtering LLM with schema including enum values
         # LLM can now learn: "prepaid" -> "PrePaid" from enum list
@@ -328,6 +429,12 @@ def filtering_node(state: AgentState) -> AgentState:
         })
 
         print(f"✅ [FILTERING] Filters extracted: {len(filter_response.get('filters', []))} filter(s)", flush=True)
+        await emit_step_event(
+            state,
+            "FILTERING_COMPLETE",
+            f"Extracted {len(filter_response.get('filters', []))} filter(s)",
+            status="COMPLETE",
+        )
         
 
         # print(state, flush=True)
@@ -339,6 +446,13 @@ def filtering_node(state: AgentState) -> AgentState:
         }
         
     except Exception as e:
+        await emit_step_event(
+            state,
+            "FILTERING_ERROR",
+            "Filtering failed",
+            status="ERROR",
+            details=str(e),
+        )
         print(f"❌ [FILTERING] Error: {str(e)}", flush=True)
         return {**state, "error": f"Filtering error: {str(e)}"}
 
@@ -439,6 +553,8 @@ def metric_processing_node(state: AgentState) -> AgentState:
         # Cache metric results
         if metric_results:
             metric_ref = cache_result(metric_results, key="metric_results")
+            normalized_metrics = {"overall": metric_results}
+            metrics_calculated = list(metric_results.keys()) if isinstance(metric_results, dict) else []
             print(f"✅ [METRIC_PROCESSING] Calculated {len(metric_results)} metrics", flush=True)
             
             # print("metric_results: ", metric_results)
@@ -447,7 +563,9 @@ def metric_processing_node(state: AgentState) -> AgentState:
             return {
                 **state,
                 "metric_results": metric_results,
-                "final_result_ref": metric_ref,  # Update final result to metrics
+                "aggregated_metrics": normalized_metrics,
+                "metrics_calculated": metrics_calculated,
+                "final_result_ref": metric_ref,
                 "error": None
             }
         else:
@@ -460,85 +578,19 @@ def metric_processing_node(state: AgentState) -> AgentState:
         print(f"❌ [METRIC_PROCESSING] Error: {str(e)}", flush=True)
         return {**state, "error": f"Metric processing error: {str(e)}"}
 
-def metric_analysis_node(state: AgentState) -> AgentState:
-    """Generate insights from calculated metrics using MetricLLM"""
-    print(f"🧠 [METRIC_ANALYSIS] Generating metric insights", flush=True)
-    
-    try:
-        metrics = state.get("metric_results", {})
-        # print("===================", flush=True)
-        # print(metrics, flush=True)
-       
-        if not metrics:
-            return {**state, "error": "No metrics available for analysis"}
-        
-        # Check if metrics contain errors
-        if isinstance(metrics, dict) and "error" in metrics:
-            return {**state, "error": f"Metric calculation failed: {metrics['error']}"}
-        
-        # Ensure we have valid metrics to analyze
-        if not isinstance(metrics, dict) or len(metrics) == 0:
-            return {**state, "error": "Invalid or empty metrics data"}
-        
-        # Prepare data summary
-        data_summary = ""
-        if state.get("final_result_ref"):
-            # Try to get raw data count for context
-            try:
-                raw_data = get_cached_result(state["final_result_ref"])
-                if isinstance(raw_data, dict) and "aov" in raw_data:
-                    # This is already metric data
-                    data_summary = f"Analyzed metrics from processed order data"
-                elif isinstance(raw_data, list) and len(raw_data) > 0:
-                    data_summary = f"Analyzed {len(raw_data)} order records"
-                elif isinstance(raw_data, pd.DataFrame) and not raw_data.empty:
-                    data_summary = f"Analyzed {len(raw_data)} order records"
-                elif isinstance(raw_data, dict) and "metrics" in raw_data:
-                    data_summary = f"Analyzed calculated metrics"
-                else:
-                    data_summary = "Analyzed order data"
-            except Exception as e:
-                print(f"[DEBUG] Error getting data summary: {e}")
-                data_summary = "Analyzed order data"
-        
-        # Call MetricLLM for analysis
-        analysis_response = metric_llm.invoke({
-            "query": state["user_query"],
-            "metrics": metrics,
-            "data_summary": data_summary
-        })
-        
-        analysis_text = analysis_response.get("analysis", "Analysis not available")
-        
-        # Create final result combining metrics and analysis
-        final_result = {
-            "query": state["user_query"],
-            "metrics": metrics,
-            "analysis": analysis_text,
-            "metrics_calculated": analysis_response.get("metrics_used", []),
-            "plan": state["plan"]
-        }
-        
-        # Cache the final analyzed result
-        final_ref = cache_result(final_result, key="final_metric_analysis")
-        
-        print(f"✅ [METRIC_ANALYSIS] Generated insights for {len(metrics)} metrics", flush=True)
-        
-        return {
-            **state,
-            "final_result_ref": final_ref,
-            "error": None
-        }
-        
-    except Exception as e:
-        print(f"❌ [METRIC_ANALYSIS] Error: {str(e)}", flush=True)
-        return {**state, "error": f"Metric analysis error: {str(e)}"}
-
-def grouping_node(state: AgentState) -> AgentState:
+async def grouping_node(state: AgentState) -> AgentState:
     """Identify comparison groups and create parallel execution branches"""
     print(f"🔀 [GROUPING] Identifying comparison groups", flush=True)
     
     try:
+        await emit_step_event(
+            state,
+            "GROUPING_START",
+            "Preparing comparison groups...",
+            status="START",
+        )
+
+        await gate_next_step(state, "Calling grouping model...", wait_ms=500)
         # Call grouping LLM to extract comparison dimensions
         grouping_response = grouping_llm.invoke({
             "query": state["user_query"],
@@ -557,6 +609,13 @@ def grouping_node(state: AgentState) -> AgentState:
                 comparison_param = list(first_group_filters.keys())[0]
         
         print(f"✅ [GROUPING] Found {len(groups)} groups comparing by '{comparison_param}': {[g['group_id'] for g in groups]}", flush=True)
+        await emit_step_event(
+            state,
+            "GROUPING_COMPLETE",
+            f"Found {len(groups)} group(s)",
+            status="COMPLETE",
+            details=f"comparison_param={comparison_param}",
+        )
         
         return {
             **state,
@@ -568,10 +627,17 @@ def grouping_node(state: AgentState) -> AgentState:
             "error": None
         }
     except Exception as e:
+        await emit_step_event(
+            state,
+            "GROUPING_ERROR",
+            "Grouping failed",
+            status="ERROR",
+            details=str(e),
+        )
         print(f"❌ [GROUPING] Error: {str(e)}", flush=True)
         return {**state, "error": f"Grouping error: {str(e)}"}
 
-def parallel_fetch_node(state: AgentState) -> AgentState:
+async def parallel_fetch_node(state: AgentState) -> AgentState:
     """Execute data fetches for current comparison group"""
     current_idx = state["current_group_index"]
     total_groups = len(state["comparison_groups"]) if state["comparison_groups"] else 0
@@ -579,6 +645,14 @@ def parallel_fetch_node(state: AgentState) -> AgentState:
     print(f"📥 [PARALLEL_FETCH] Fetching group {current_idx + 1}/{total_groups}: {group_id}", flush=True)
     
     try:
+        await emit_step_event(
+            state,
+            "PARALLEL_FETCH_START",
+            f"Fetching {group_id}",
+            status="START",
+            details=f"Group {current_idx + 1}/{total_groups}",
+        )
+
         plan = state["plan"]
         current_group = state["comparison_groups"][state["current_group_index"]]
         
@@ -588,6 +662,8 @@ def parallel_fetch_node(state: AgentState) -> AgentState:
         tool_function = TOOL_REGISTRY.get(plan["tool"])
         if not tool_function:
             return {**state, "error": f"Tool {plan['tool']} not found"}
+
+        await gate_next_step(state, f"Executing {plan['tool']} for {group_id}...", wait_ms=500)
         
         # Fetch data using only base parameters (date range)
         result = tool_function(**plan["base_params"])
@@ -608,6 +684,13 @@ def parallel_fetch_node(state: AgentState) -> AgentState:
         schema = extract_schema_with_enums(result)
         
         print(f"✅ [PARALLEL_FETCH] Fetched {len(result) if isinstance(result, list) else 1} records for {current_group['group_id']}", flush=True)
+        await emit_step_event(
+            state,
+            "PARALLEL_FETCH_COMPLETE",
+            f"Fetched data for {current_group['group_id']}",
+            status="COMPLETE",
+            details=f"Records: {len(result) if isinstance(result, list) else 1}",
+        )
         
         group_results = state["group_results"].copy()
         group_results[current_group["group_id"]] = result_key
@@ -624,6 +707,13 @@ def parallel_fetch_node(state: AgentState) -> AgentState:
         }
         
     except Exception as e:
+        await emit_step_event(
+            state,
+            "PARALLEL_FETCH_ERROR",
+            "Parallel fetch failed",
+            status="ERROR",
+            details=str(e),
+        )
         print(f"❌ [PARALLEL_FETCH] Error: {str(e)}", flush=True)
         return {**state, "error": f"Parallel fetch error: {str(e)}"}
 
@@ -819,11 +909,18 @@ def comparison_node(state: AgentState) -> AgentState:
         print(f"❌ [COMPARISON] Error: {str(e)}", flush=True)
         return {**state, "error": f"Comparison error: {str(e)}"}
 
-def insight_generation_node(state: AgentState) -> AgentState:
-    """Generate natural language insights from comparison"""
+async def insight_generation_node(state: AgentState) -> AgentState:
+    """Generate natural language insights for comparison and metric analysis."""
     print(f"💡 [INSIGHTS] Generating natural language summary", flush=True)
     
     try:
+        await emit_step_event(
+            state,
+            "INSIGHT_START",
+            "Generating insights...",
+            status="START",
+        )
+
         # Call insight LLM to generate natural language summary
         # Extract date range from plan base_params or first step params
         date_range = {}
@@ -845,31 +942,68 @@ def insight_generation_node(state: AgentState) -> AgentState:
                     "end_date": step_params["end_date"]
                 }
         
+        query_type = state["plan"].get("query_type", "standard")
+        is_metric_query = query_type == "metric_analysis"
+
+        normalized_metrics = state.get("aggregated_metrics")
+        if not normalized_metrics and is_metric_query and state.get("metric_results"):
+            normalized_metrics = {"overall": state["metric_results"]}
+
+        await gate_next_step(state, "Calling insight model...", wait_ms=500)
         insight_response = insight_llm.invoke({
             "query": state["user_query"],
-            "metrics": state["aggregated_metrics"],
-            "comparison": state["comparison_results"],
-            "date_range": date_range
+            "metrics": normalized_metrics or {},
+            "comparison": state["comparison_results"] if query_type == "comparison" else None,
+            "date_range": date_range,
+            "analysis_mode": query_type,
+            "raw_metrics": state.get("metric_results", {})
         })
         
         print(f"✅ [INSIGHTS] Generated {len(insight_response['insights'])} chars of insights", flush=True)
-        
-        # Cache insights as final result
-        final_ref = cache_result({
-            "insights": insight_response["insights"],
-            "comparison_data": state["comparison_results"],
-            "detailed_metrics": state["aggregated_metrics"],
+        await emit_step_event(
+            state,
+            "INSIGHT_COMPLETE",
+            "Insights generated",
+            status="COMPLETE",
+            details=f"Chars: {len(insight_response.get('insights', ''))}",
+        )
+
+        analysis_text = insight_response.get("analysis", insight_response.get("insights", ""))
+        metrics_calculated = state.get("metrics_calculated")
+        if not metrics_calculated and isinstance(state.get("metric_results"), dict):
+            metrics_calculated = list(state["metric_results"].keys())
+
+        # Unified internal payload used by route adapters.
+        final_payload = {
+            "query": state["user_query"],
+            "analysis_mode": query_type,
+            "insights": insight_response.get("insights", ""),
+            "analysis": analysis_text,
+            "metrics": state.get("metric_results"),
+            "metrics_calculated": metrics_calculated or [],
+            "comparison_data": state.get("comparison_results") if query_type == "comparison" else None,
+            "detailed_metrics": normalized_metrics,
             "plan": state["plan"]
-        }, key="comparison_final")
+        }
+
+        final_ref = cache_result(final_payload, key="final_insight_result")
         
         return {
             **state,
-            "insights": insight_response["insights"],
+            "insights": insight_response.get("insights", ""),
+            "metric_analysis": analysis_text if is_metric_query else state.get("metric_analysis"),
             "final_result_ref": final_ref,
             "error": None
         }
         
     except Exception as e:
+        await emit_step_event(
+            state,
+            "INSIGHT_ERROR",
+            "Insight generation failed",
+            status="ERROR",
+            details=str(e),
+        )
         print(f"❌ [INSIGHTS] Error: {str(e)}", flush=True)
         return {**state, "error": f"Insight generation error: {str(e)}"}
 
@@ -957,7 +1091,6 @@ workflow.add_node("no_filter", no_filter_node)
 
 # Add nodes - Metric analysis flow
 workflow.add_node("metric_processing", metric_processing_node)
-workflow.add_node("metric_analysis", metric_analysis_node)
 
 # Add nodes - Comparison flow
 workflow.add_node("grouping", grouping_node)
@@ -1009,8 +1142,7 @@ workflow.add_edge("apply_filters", END)
 workflow.add_edge("no_filter", END)
 
 # Metric analysis flow
-workflow.add_edge("metric_processing", "metric_analysis")
-workflow.add_edge("metric_analysis", END)
+workflow.add_edge("metric_processing", "insight_generation")
 
 # Comparison flow
 workflow.add_edge("grouping", "parallel_fetch")
@@ -1065,7 +1197,8 @@ if __name__ == '__main__':
         comparison_results=None,
         insights=None,
         metric_results=None,
-        metric_analysis=None
+        metric_analysis=None,
+        metrics_calculated=None
     )
 
     # Example 2: Comparison query
@@ -1090,7 +1223,8 @@ if __name__ == '__main__':
         comparison_results=None,
         insights=None,
         metric_results=None,
-        metric_analysis=None
+        metric_analysis=None,
+        metrics_calculated=None
     )
 
     # Example 3: Metric analysis query
@@ -1115,7 +1249,8 @@ if __name__ == '__main__':
         comparison_results=None,
         insights=None,
         metric_results=None,
-        metric_analysis=None
+        metric_analysis=None,
+        metrics_calculated=None
     )
 
     # Run standard query
@@ -1154,7 +1289,7 @@ if __name__ == '__main__':
         final_data = get_cached_result(result_metric["final_result_ref"])
         print(f"Plan: {final_data['plan']}")
         print(f"\nQuery: {final_data['query']}")
-        print(f"\nMetrics: {final_data['metrics']}")
-        print(f"\nAnalysis:\n{final_data['analysis']}")
+        print(f"\nMetrics: {final_data.get('metrics')}")
+        print(f"\nAnalysis:\n{final_data.get('analysis', final_data.get('insights', ''))}")
     else:
         print(f"Error: {result_metric['error']}")

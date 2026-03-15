@@ -1,8 +1,9 @@
 import os
+import uuid
 import uvicorn
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
 from dotenv import load_dotenv
@@ -55,7 +56,6 @@ def custom_json_encoder(obj):
 
 # Import route modules
 from routes.health import router as health_router
-from routes.websocket import router as websocket_router  
 from routes.query import router as query_router
 from routes.orders import router as orders_router
 from routes.revenue import router as revenue_router
@@ -70,9 +70,20 @@ app = FastAPI(
     version="1.0.0"
 )
 
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    """Attach a stable request id for correlation across query processing and log polling."""
+    incoming_request_id = request.headers.get("X-Request-ID")
+    request_id = incoming_request_id or str(uuid.uuid4())[:8]
+    request.state.request_id = request_id
+
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    return response
+
 # Configure FastAPI to use custom JSON encoder for numpy/pandas types
 from fastapi.responses import JSONResponse
-from fastapi import Request
 import typing
 
 class CustomJSONResponse(JSONResponse):
@@ -106,6 +117,7 @@ app.add_middleware(
         "Accept",
         "Origin",
         "X-Requested-With",
+        "X-Request-ID",
         "Access-Control-Request-Method",
         "Access-Control-Request-Headers"
     ],
@@ -114,7 +126,6 @@ app.add_middleware(
 
 # Include routers
 app.include_router(health_router)
-app.include_router(websocket_router)
 app.include_router(query_router)
 app.include_router(orders_router)
 app.include_router(revenue_router)

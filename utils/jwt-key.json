@@ -1,0 +1,22 @@
+{
+  "data": {
+    "companyname": "Easy Spirit Enterprises Private Limited",
+    "all_location": 0,
+    "time_zone": "Asia/Kolkata",
+    "logo_url": null,
+    "brandname": null,
+    "brand_id": null,
+    "logo": null,
+    "credit_limit": null,
+    "credit_balance": null,
+    "userName": "Gianeshwar Saini",
+    "paymentKey": 0,
+    "serialMode": false,
+    "token": {
+      "jwt_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJodHRwczpcL1wvbG9hZGJhbGFuY2VyLXYyLW0uZWFzeWVjb20uaW9cL2FjY2Vzc1wvdG9rZW4iLCJpYXQiOjE3NzM0MTAxOTYsImV4cCI6MTc4MTI5NDE5NiwibmJmIjoxNzczNDEwMTk2LCJqdGkiOiI3QXkyQnFGWVRXbHpNdUhsIiwic3ViIjoyNzA4MTUsInBydiI6ImE4NGRlZjY0YWQwMTE1ZDVlY2NjMWY4ODQ1YmNkMGU3ZmU2YzRiNjAiLCJ1c2VyX2lkIjoyNzA4MTUsImNvbXBhbnlfaWQiOjIyODc4MSwicm9sZV90eXBlX2lkIjoyLCJwaWlfYWNjZXNzIjowLCJwaWlfcmVwb3J0X2FjY2VzcyI6MCwicm9sZXMiOm51bGwsImNfaWQiOjIyODc4MSwidV9pZCI6MjcwODE1LCJsb2NhdGlvbl9yZXF1ZXN0ZWRfZm9yIjoyMjg3ODF9.j5kPD2DOSD66w3t4IttqmqgqlLNOoy4vfAQuXpOghcE",
+      "token_type": "bearer",
+      "expires_in": 7884000
+    }
+  },
+  "message": null
+}

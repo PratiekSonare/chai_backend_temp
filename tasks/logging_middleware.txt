@@ -1,0 +1,10 @@
+Develop a logging middleware using fastapi route to real-time frontend fetching.
+Need simple summary of the background steps that are taking place to let the user know of the backend procedures.
+
+An planning LLM first creates an plan -> frontend displays -> "Planning execution..."
+A plan is created and a step-wise execution is done -> "Executing get_all_orders..."
+...
+...
+
+I need to also add 500ms debouncing between each step / each API call to ensure integrity...
+

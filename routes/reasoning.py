@@ -10,7 +10,6 @@ import json
 # Import reasoning components
 from reasoning_agents import create_reasoning_agent
 from enhanced_planning_llm import reasoning_planning_llm
-from utils.connection_manager import manager
 
 router = APIRouter(prefix="/reasoning", tags=["reasoning"])
 
@@ -131,12 +130,6 @@ async def process_with_react(request: ReasoningQueryRequest):
     try:
         request_id = str(uuid.uuid4())[:8]
         
-        # Create logger for reasoning trace
-        async def reasoning_logger(req_id: str, step: str, message: str):
-            await manager.log_request_step(req_id, step, message)
-        
-        await manager.log_request_start(request_id, f"ReACT: {request.query}")
-        
         # Create ReACT agent
         react_agent = create_reasoning_agent("react")
         
@@ -166,12 +159,6 @@ async def process_with_react(request: ReasoningQueryRequest):
             "context": request.context or {},
             "goal": f"Comprehensively answer: {request.query}"
         })
-        
-        await manager.log_request_step(
-            request_id, 
-            "REACT_COMPLETE", 
-            f"Completed ReACT reasoning with {len(result.get('reasoning_trace', []))} steps"
-        )
         
         response_data = {
             "success": True,
@@ -209,8 +196,6 @@ async def process_with_cot(request: ReasoningQueryRequest):
     try:
         request_id = str(uuid.uuid4())[:8]
         
-        await manager.log_request_start(request_id, f"CoT: {request.query}")
-        
         # Create CoT agent
         cot_agent = create_reasoning_agent("cot")
         
@@ -223,12 +208,6 @@ async def process_with_cot(request: ReasoningQueryRequest):
             "data": request.context or {},
             "analysis_type": analysis_type
         })
-        
-        await manager.log_request_step(
-            request_id,
-            "COT_COMPLETE",
-            f"Completed CoT reasoning with {len(result.get('reasoning_steps', []))} steps"
-        )
         
         response_data = {
             "success": True,
@@ -265,7 +244,6 @@ async def compare_reasoning_approaches(request: ReasoningQueryRequest):
     """
     try:
         request_id = str(uuid.uuid4())[:8]
-        await manager.log_request_start(request_id, f"Compare: {request.query}")
         
         results = {}
         

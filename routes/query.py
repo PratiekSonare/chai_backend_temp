@@ -2,10 +2,10 @@ import uuid
 import numpy as np
 import pandas as pd
 from decimal import Decimal
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Header, Request
 from models import QueryRequest
 from workflow import app as workflow_app, AgentState
-from utils.connection_manager import manager
+from utils.request_log_store import append_request_log, read_request_logs, get_latest_sequence
 
 def convert_numpy_types(obj):
     """Recursively convert numpy types and pandas objects to JSON-serializable types"""
@@ -48,6 +48,17 @@ def convert_numpy_types(obj):
 
 router = APIRouter()
 
+
+@router.get('/query/logs/{request_id}')
+async def get_query_logs(request_id: str, since: int = 0):
+    logs = read_request_logs(request_id, since_sequence=since)
+    return {
+        "success": True,
+        "request_id": request_id,
+        "logs": logs,
+        "next_sequence": get_latest_sequence(request_id)
+    }
+
 @router.post('/plan')
 async def generate_plan(request: QueryRequest):
     try:
@@ -89,7 +100,11 @@ async def generate_plan(request: QueryRequest):
         )
 
 @router.post('/query')
-async def process_query(request: QueryRequest):
+async def process_query(
+    request: QueryRequest,
+    raw_request: Request,
+    x_request_id: str | None = Header(default=None, alias="X-Request-ID")
+):
     """
     Process a natural language query
     
@@ -109,21 +124,35 @@ async def process_query(request: QueryRequest):
 
     print("running query...", flush=True)
 
-    # Generate unique request ID
+    # Use request id from middleware/header if available.
     user_query = request.query.strip()
-    request_id = str(uuid.uuid4())[:8]
-    
-    # Create logger function for workflow
-    async def workflow_logger(req_id: str, step: str, message: str):
-        await manager.log_request_step(req_id, step, message)
+    request_id = getattr(raw_request.state, "request_id", None) or x_request_id or str(uuid.uuid4())[:8]
+
+    append_request_log(
+        request_id=request_id,
+        step_key="REQUEST_START",
+        summary="Query request accepted",
+        details=user_query[:200],
+        status="START"
+    )
     
     try:
-        await manager.log_request_start(request_id, user_query)
-        await manager.log_request_step(request_id, "initialize", "Initializing workflow")
-        
-        # Analyze query type (will be determined by planning LLM)
-        await manager.log_request_step(request_id, "analyze_query", "Planning LLM will determine query type")
-        
+        async def workflow_logger(
+            req_id: str,
+            step_key: str,
+            summary: str,
+            payload: dict | None = None,
+        ):
+            payload = payload or {}
+            append_request_log(
+                request_id=req_id,
+                step_key=step_key,
+                summary=summary,
+                details=payload.get("details"),
+                status=payload.get("status", "INFO"),
+                wait_ms=payload.get("wait_ms"),
+            )
+
         initial_state = AgentState(
             user_query=user_query,
             summarized_query=None,
@@ -150,29 +179,25 @@ async def process_query(request: QueryRequest):
         )
         
         # Run workflow
-        await manager.log_request_step(request_id, "execute_workflow", "Running order analysis workflow")
-
         print("running state...", flush=True)
         result = await workflow_app.ainvoke(initial_state)
-        
-        # Debug: Print the result structure
-        print("workflow result keys:", list(result.keys()) if isinstance(result, dict) else type(result), flush=True)
-        print("final_result_ref:", result.get("final_result_ref"), flush=True)
-        print("tool_result_refs:", result.get("tool_result_refs"), flush=True)
-        print("error:", result.get("error"), flush=True)
-        
-        # Debug: Show what the planning LLM determined
-        if result.get("plan"):
-            plan = result["plan"]
-            print(f"planning LLM determined query_type: {plan.get('query_type')}", flush=True)
-            print(f"planning LLM set comparison_mode: {result.get('comparison_mode')}", flush=True)
-            # Log the workflow type that was executed
-            query_type = plan.get('query_type', 'standard')
-            await manager.log_request_step(request_id, "workflow_executed", f"Executed {query_type} workflow")
-        
+
+        append_request_log(
+            request_id=request_id,
+            step_key="WORKFLOW_COMPLETE",
+            summary="Workflow execution finished",
+            status="COMPLETE"
+        )
+
         # Check for errors
         if result.get("error"):
-            await manager.log_request_end(request_id, True, error=result["error"])
+            append_request_log(
+                request_id=request_id,
+                step_key="WORKFLOW_ERROR",
+                summary="Workflow returned error",
+                details=result["error"],
+                status="ERROR"
+            )
             raise HTTPException(
                 status_code=500,
                 detail={
@@ -184,7 +209,6 @@ async def process_query(request: QueryRequest):
         
         # Get final result
         if result.get("final_result_ref"):
-            await manager.log_request_step(request_id, "process_results", "Processing final results")
             print(f"retrieving cached result for: {result['final_result_ref']}", flush=True)
             from workflow import get_cached_result
             
@@ -197,7 +221,6 @@ async def process_query(request: QueryRequest):
                 
                 # Get query type from the plan
                 query_type = result.get("plan", {}).get("query_type", "standard")
-                print(f"query type: {query_type}", flush=True)
                 
                 # Handle different response formats based on query type
                 if query_type == "comparison" and isinstance(final_data, dict) and "insights" in final_data:
@@ -206,21 +229,23 @@ async def process_query(request: QueryRequest):
                         "success": True,
                         "query_type": "comparison",
                         "request_id": request_id,
+                        "logs": read_request_logs(request_id),
                         "summarized_query": result.get("summarized_query", ""),
                         "insights": final_data["insights"],
                         "comparison_data": final_data.get("comparison_data"),
                         "detailed_metrics": final_data.get("detailed_metrics")
                     }
-                elif query_type == "metric_analysis" and isinstance(final_data, dict) and "metrics" in final_data and "analysis" in final_data:
+                elif query_type == "metric_analysis" and isinstance(final_data, dict) and "metrics" in final_data and ("analysis" in final_data or "insights" in final_data):
                     # Metric analysis query response
                     response_data = {
                         "success": True,
                         "query_type": "metric_analysis",
                         "request_id": request_id,
+                        "logs": read_request_logs(request_id),
                         "summarized_query": result.get("summarized_query", ""),
                         "query": final_data["query"],
                         "metrics": final_data["metrics"],
-                        "analysis": final_data["analysis"],
+                        "analysis": final_data.get("analysis", final_data.get("insights", "")),
                         "metrics_calculated": final_data.get("metrics_calculated", []),
                         "plan": final_data["plan"]
                     }
@@ -230,6 +255,7 @@ async def process_query(request: QueryRequest):
                         "success": True,
                         "query_type": "schema_discovery", 
                         "request_id": request_id,
+                        "logs": read_request_logs(request_id),
                         "summarized_query": result.get("summarized_query", ""),
                         **final_data  # Include all schema data
                     }
@@ -241,6 +267,7 @@ async def process_query(request: QueryRequest):
                         response_data = final_data
                         # Update with current request info if needed
                         response_data["request_id"] = request_id
+                        response_data["logs"] = read_request_logs(request_id)
                         if result.get("summarized_query"):
                             response_data["summarized_query"] = result.get("summarized_query")
                     else:
@@ -250,6 +277,7 @@ async def process_query(request: QueryRequest):
                             "success": True,
                             "query_type": "standard",
                             "request_id": request_id,
+                            "logs": read_request_logs(request_id),
                             "summarized_query": result.get("summarized_query", ""),
                             "count": record_count,
                             "data": final_data,
@@ -260,7 +288,6 @@ async def process_query(request: QueryRequest):
                 
             except Exception as cache_error:
                 print(f"error retrieving cached result: {cache_error}", flush=True)
-                await manager.log_request_end(request_id, True, error=str(cache_error))
                 raise HTTPException(
                     status_code=500,
                     detail={
@@ -292,26 +319,6 @@ async def process_query(request: QueryRequest):
             except Exception as field_error:
                 print(f"error adding optional fields: {field_error}", flush=True)
                 # Continue without the optional fields rather than failing
-            
-            try:
-                print("logging request end...", flush=True)
-                
-                # Enhanced logging based on query type
-                if response_data["query_type"] == "comparison":
-                    await manager.log_request_end(request_id, False, "Comparison analysis completed successfully")
-                elif response_data["query_type"] == "metric_analysis":
-                    metrics_count = len(response_data.get("metrics_calculated", []))
-                    await manager.log_request_end(request_id, False, f"Metric analysis completed - calculated {metrics_count} metrics")
-                elif response_data["query_type"] == "schema_discovery":
-                    await manager.log_request_end(request_id, False, "Schema discovery completed successfully")
-                else:
-                    record_count = response_data.get("count", 0)
-                    await manager.log_request_end(request_id, False, f"Query completed successfully - returned {record_count} records")
-                
-                print("request logged successfully", flush=True)
-            except Exception as log_error:
-                print(f"logging error (non-fatal): {log_error}", flush=True)
-                # Continue even if logging fails
             
             try:
                 print(f"returning response_data keys: {list(response_data.keys())}", flush=True)
@@ -347,6 +354,7 @@ async def process_query(request: QueryRequest):
                     response_data = {
                         "success": True,
                         "request_id": request_id,
+                        "logs": read_request_logs(request_id),
                         "data": final_data,
                         "metadata": {"source": "fallback_last_step"}
                     }
@@ -355,14 +363,12 @@ async def process_query(request: QueryRequest):
                     response_data = convert_numpy_types(response_data)
                     
                     print("fallback successful", flush=True)
-                    await manager.log_request_end(request_id, False)
                     return response_data
                 else:
                     print("fallback failed: save_as missing or not in tool_result_refs", flush=True)
             except Exception as fallback_error:
                 print(f"fallback error: {fallback_error}", flush=True)
         
-        await manager.log_request_end(request_id, False, error="No result generated")
         raise HTTPException(
             status_code=500,
             detail={
@@ -372,7 +378,24 @@ async def process_query(request: QueryRequest):
             }
         )
         
+    except HTTPException as http_error:
+        append_request_log(
+            request_id=request_id,
+            step_key="REQUEST_ERROR",
+            summary="HTTP exception in /query",
+            details=str(http_error.detail),
+            status="ERROR"
+        )
+        raise http_error
+
     except Exception as e:
+        append_request_log(
+            request_id=request_id,
+            step_key="REQUEST_ERROR",
+            summary="Unhandled exception in /query",
+            details=str(e),
+            status="ERROR"
+        )
         raise HTTPException(
             status_code=500,
             detail={

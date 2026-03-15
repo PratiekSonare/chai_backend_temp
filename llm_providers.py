@@ -14,7 +14,7 @@ class OpenRouterLLM:
     def __init__(self):
         self.api_key = os.getenv("OPENROUTER_API_KEY")
         self.model = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
-        self.site_url = os.getenv("OPENROUTER_SITE_URL", "http://13.126.136.209:5000")
+        self.site_url = os.getenv("OPENROUTER_SITE_URL", "http://localhost:5000")
         self.site_name = os.getenv("OPENROUTER_SITE_NAME", "Order Analysis Workflow")
         self.base_url = "https://openrouter.ai/api/v1/chat/completions"
         
@@ -934,11 +934,13 @@ class InsightLLM(OpenRouterLLM):
     """Insight generation LLM - creates natural language summaries with market context"""
     
     def invoke(self, params: dict) -> dict:
-        """Generate natural language insights from comparison with market context"""
+        """Generate natural language insights for comparison and metric analysis with market context."""
         query = params.get("query", "")
         comparison = params.get("comparison", {})
         metrics = params.get("metrics", {})
+        raw_metrics = params.get("raw_metrics", {})
         date_range = params.get("date_range", {})
+        analysis_mode = params.get("analysis_mode", "comparison")
         
         # Get market context from news
         market_context = ""
@@ -966,59 +968,94 @@ class InsightLLM(OpenRouterLLM):
         else:
             print("DEBUG: Skipping news context fetch due to condition check", flush=True)
         
-        prompt = f"""You are a data insights analyst for an e-commerce footwear order system.
+        if analysis_mode == "metric_analysis":
+            prompt = f"""You are a data insights analyst for an e-commerce footwear order system.
 
-        User Query: "{query}"
+User Query: "{query}"
 
-        Comparison Data:
-        {json.dumps(comparison, indent=2)}
+Normalized Metrics:
+{json.dumps(metrics, indent=2)}
 
-        Detailed Metrics by Group:
-        {json.dumps(metrics, indent=2)}
+Raw Metric Results:
+{json.dumps(raw_metrics, indent=2)}
 
-        Market Context from News Analysis:
-        {market_context}
+Market Context from News Analysis:
+{market_context}
 
-        Generate a comprehensive analysis combining your sales data insights with market context. 
+Generate a comprehensive metric-focused analysis with clear business implications.
 
-        IMPORTANT: Format your response in Markdown. Use bullet points for each insight.
-        Strictly use this exact format:
+IMPORTANT: Format your response in Markdown. Use bullet points only.
+Strictly use this exact format:
 
-        - **Bold title/metric:** [detailed explanation with specific numbers]
-        - **Bold title/metric:** [detailed explanation with specific numbers]
+- **Bold title/metric:** [detailed explanation with specific numbers]
+- **Bold title/metric:** [detailed explanation with specific numbers]
 
-        Example:
-        - **Order Volume Performance:** Maharashtra leads with 505 orders vs Telangana's 154 orders (69.5% higher)
-        - **Revenue Analysis:** Total revenue shows Maharashtra at ₹282,699 compared to Telangana's ₹106,043 
+Include both DATA-DRIVEN insights and MARKET CONTEXT insights (if available):
+- KPI interpretation and performance significance
+- Trends and anomalies in metric values
+- Distribution and segment analysis (payment modes, geography, status)
+- Practical recommendations with expected business impact
+- External factors from market context that may explain metric movement
 
-        The comparison data may be either:
-        - "pairwise" (2 groups): Direct A vs B comparison with specific differences and percentages
-        - "multi_group" (3+ groups): Multiple groups with a baseline comparison and overall winners
+All monetary values should be in INR and every point should reference concrete numbers from the provided metrics.
+"""
+        else:
+            #comparison
+            prompt = f"""You are a data insights analyst for an e-commerce footwear order system.
 
-        Include both DATA-DRIVEN insights and MARKET CONTEXT insights:
-        
-        DATA INSIGHTS:
-        - Order volume comparisons with percentages
-        - Revenue analysis with specific amounts  
-        - AOV trends and patterns
-        - Geographic and demographic patterns
-        - Payment mode and marketplace performance differences
-        
-        MARKET CONTEXT INSIGHTS (if available):
-        - How external market factors may have influenced your metrics
-        - Industry trends affecting your footwear performance
-        - Competitive landscape impact on sales
-        - Economic factors correlation with sales patterns
-        - Seasonal and event-driven factors
+User Query: "{query}"
 
-        Make insights actionable and business-focused for footwear e-commerce.
+Comparison Data:
+{json.dumps(comparison, indent=2)}
 
-        Return your insights in the numbered point format described above."""
+Detailed Metrics by Group:
+{json.dumps(metrics, indent=2)}
+
+Market Context from News Analysis:
+{market_context}
+
+Generate a comprehensive analysis combining your sales data insights with market context.
+
+IMPORTANT: Format your response in Markdown. Use bullet points for each insight.
+Strictly use this exact format:
+
+- **Bold title/metric:** [detailed explanation with specific numbers]
+- **Bold title/metric:** [detailed explanation with specific numbers]
+
+Example:
+- **Order Volume Performance:** Maharashtra leads with 505 orders vs Telangana's 154 orders (69.5% higher)
+- **Revenue Analysis:** Total revenue shows Maharashtra at ₹282,699 compared to Telangana's ₹106,043
+
+The comparison data may be either:
+- "pairwise" (2 groups): Direct A vs B comparison with specific differences and percentages
+- "multi_group" (3+ groups): Multiple groups with a baseline comparison and overall winners
+
+Include both DATA-DRIVEN insights and MARKET CONTEXT insights:
+
+DATA INSIGHTS:
+- Order volume comparisons with percentages
+- Revenue analysis with specific amounts
+- AOV trends and patterns
+- Geographic and demographic patterns
+- Payment mode and marketplace performance differences
+
+MARKET CONTEXT INSIGHTS (if available):
+- How external market factors may have influenced your metrics
+- Industry trends affecting your footwear performance
+- Competitive landscape impact on sales
+- Economic factors correlation with sales patterns
+- Seasonal and event-driven factors
+
+Make insights actionable and business-focused for footwear e-commerce.
+"""
 
         response = self._call_api([{"role": "user", "content": prompt}], temperature=0.7)
         
         return {
             "insights": response.strip(),
+            "analysis": response.strip(),
+            "metrics_used": list(raw_metrics.keys()) if isinstance(raw_metrics, dict) else list(metrics.keys()) if isinstance(metrics, dict) else [],
+            "analysis_mode": analysis_mode,
             "market_context_included": bool(market_context)
         }
     
@@ -1033,7 +1070,6 @@ class InsightLLM(OpenRouterLLM):
 
 
 #provide RAG business logic to both - Metric & Insight LLM
-
 planning_llm = PlanningLLM()
 filtering_llm = FilteringLLM()
 grouping_llm = GroupingLLM()

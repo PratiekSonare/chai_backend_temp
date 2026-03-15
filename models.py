@@ -9,9 +9,6 @@ class HealthResponse(BaseModel):
     status: str
     service: str
 
-class LogsRequest(BaseModel):
-    request_id: str
-
 class OrdersMetricsRequest(BaseModel):
     orders: List[Dict[str, Any]]
 

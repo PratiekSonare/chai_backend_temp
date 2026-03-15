@@ -16,9 +16,7 @@ def get_examples():
     return {
         "endpoints": {
             "/plan": "POST - Generate execution plan without running the query",
-            "/query": "POST - Execute the full query workflow and return results",
-            "/sse/logs": "SSE - Real-time log streaming for all requests",
-            "/logs/{request_id}": "GET - Retrieve logs for a specific request ID"
+            "/query": "POST - Execute the full query workflow and return results"
         },
         "schema_discovery_queries": [
             "What fields are available in the orders data?",
