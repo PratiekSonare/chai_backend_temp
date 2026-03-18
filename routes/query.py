@@ -5,6 +5,7 @@ from decimal import Decimal
 from fastapi import APIRouter, HTTPException, Header, Request
 from models import QueryRequest
 from workflow import app as workflow_app, AgentState
+from llm_providers import planning_llm
 from utils.request_log_store import append_request_log, read_request_logs, get_latest_sequence
 
 def convert_numpy_types(obj):
@@ -63,18 +64,11 @@ async def get_query_logs(request_id: str, since: int = 0):
 async def generate_plan(request: QueryRequest):
     try:
         user_query = request.query.strip()
-        
-        # Create initial state for planning
-        initial_state = AgentState(
-            user_query=user_query,
-            summarized_query=None,
-            plan=None,
-            # ... other fields with default values
-        )
-        
-        # Use planner node only for plan generation
-        from workflow import planner
-        result = planner(initial_state)
+
+        # Generate a plan directly from the user query.
+        result = planning_llm.invoke(user_query)
+        plan = result.get("plan", {})
+        is_comparison = isinstance(plan, dict) and plan.get("query_type") == "comparison"
         
         # Convert any numpy types in the result to JSON-serializable types
         result = convert_numpy_types(result)
@@ -82,8 +76,8 @@ async def generate_plan(request: QueryRequest):
         response_data = {
             "success": True,
             "query": user_query,
-            "plan": result.get("plan", []),
-            "is_comparison": result.get("comparison_mode", False)
+            "plan": plan,
+            "is_comparison": is_comparison
         }
         
         # Convert the entire response as well
@@ -235,11 +229,11 @@ async def process_query(
                         "comparison_data": final_data.get("comparison_data"),
                         "detailed_metrics": final_data.get("detailed_metrics")
                     }
-                elif query_type == "metric_analysis" and isinstance(final_data, dict) and "metrics" in final_data and ("analysis" in final_data or "insights" in final_data):
+                elif query_type in ["metric_analysis", "custom_metric_generation"] and isinstance(final_data, dict) and "metrics" in final_data and ("analysis" in final_data or "insights" in final_data):
                     # Metric analysis query response
                     response_data = {
                         "success": True,
-                        "query_type": "metric_analysis",
+                        "query_type": query_type,
                         "request_id": request_id,
                         "logs": read_request_logs(request_id),
                         "summarized_query": result.get("summarized_query", ""),

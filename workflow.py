@@ -527,7 +527,13 @@ def metric_processing_node(state: AgentState) -> AgentState:
         metric_results = {}
         
         # Extract which metrics were requested based on the plan steps
-        metric_tools = [step for step in plan["steps"] if step["tool"].startswith("get_") and step["tool"] != "get_all_orders" and step["tool"] != "get_schema_info"]
+        metric_tools = [
+            step for step in plan["steps"]
+            if (
+                (step["tool"].startswith("get_") and step["tool"] not in ["get_all_orders", "get_schema_info"])
+                or step["tool"] == "execute_custom_calculation"
+            )
+        ]
         
         # print("state[tool_result_refs]: ", state["tool_result_refs"])
         # print("metric_tools: ", metric_tools)
@@ -539,8 +545,18 @@ def metric_processing_node(state: AgentState) -> AgentState:
             # print("save_as: ", save_as)
             if save_as in state["tool_result_refs"]:
                 # Result already calculated
-                metric_results[tool_name] = get_cached_result(state["tool_result_refs"][save_as])
-                print(f"Found cached metric result for {tool_name}: {metric_results[tool_name]}")
+                cached_metric = get_cached_result(state["tool_result_refs"][save_as])
+
+                if tool_name == "execute_custom_calculation" and isinstance(cached_metric, dict):
+                    custom_metric_name = metric_step.get("params", {}).get("metric_name") or save_as
+                    if cached_metric.get("success") and custom_metric_name in cached_metric:
+                        metric_results[custom_metric_name] = cached_metric.get(custom_metric_name)
+                    else:
+                        metric_results[custom_metric_name] = cached_metric
+                    print(f"Found cached custom metric result for {custom_metric_name}: {metric_results[custom_metric_name]}")
+                else:
+                    metric_results[tool_name] = cached_metric
+                    print(f"Found cached metric result for {tool_name}: {metric_results[tool_name]}")
         
         # print("==========>>>>> plan", flush=True)
         # print(state['plan'], flush=True)
@@ -943,7 +959,7 @@ async def insight_generation_node(state: AgentState) -> AgentState:
                 }
         
         query_type = state["plan"].get("query_type", "standard")
-        is_metric_query = query_type == "metric_analysis"
+        is_metric_query = query_type in ["metric_analysis", "custom_metric_generation"]
 
         normalized_metrics = state.get("aggregated_metrics")
         if not normalized_metrics and is_metric_query and state.get("metric_results"):
@@ -1031,8 +1047,8 @@ def needs_manipulation(state: AgentState) -> Literal["filtering", "no_filter", "
     if state["plan"].get("query_type") == "schema_discovery":
         return "no_filter"
     
-    # Metric analysis queries go directly to metric processing
-    if state["plan"].get("query_type") == "metric_analysis":
+    # Metric analysis and custom metric generation queries go directly to metric processing
+    if state["plan"].get("query_type") in ["metric_analysis", "custom_metric_generation"]:
         return "metric_processing"
     
     if state["plan"]["manipulation"]["required"]:
@@ -1056,9 +1072,9 @@ def is_comparison_query(state: AgentState) -> Literal["grouping", "execute_tool"
     
     query_type = state["plan"].get("query_type")
     
-    # Schema discovery and metric analysis queries go through standard execute_tool flow
+    # Schema discovery and metric queries go through standard execute_tool flow
     # They just return schema info or processed metrics instead of data
-    if query_type in ["schema_discovery", "metric_analysis"]:
+    if query_type in ["schema_discovery", "metric_analysis", "custom_metric_generation"]:
         return "execute_tool"
     
     if query_type == "comparison":

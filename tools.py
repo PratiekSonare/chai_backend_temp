@@ -5,18 +5,114 @@ import os
 import requests
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
+import ast
 import pandas as pd
 import numpy as np
 import json
 import boto3
+import re
+import signal
+import sys
 from utils.type_converters import convert_numpy_types
 
 s3 = boto3.client('s3')
 
+
+MAX_CUSTOM_CALC_CODE_LEN = 4000
+MAX_CUSTOM_RESULT_SIZE = 10_000_000
+CUSTOM_CALC_TIMEOUT_SECONDS = 5
+
+
+def _is_valid_metric_name(metric_name: str) -> bool:
+    if not isinstance(metric_name, str) or not metric_name:
+        return False
+    return re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', metric_name) is not None
+
+
+def _validate_custom_calculation_code(calculation_code: str) -> tuple[bool, str]:
+    """Validate custom calculation code before execution."""
+    if not isinstance(calculation_code, str) or not calculation_code.strip():
+        return False, "calculation_code must be a non-empty string"
+
+    if len(calculation_code) > MAX_CUSTOM_CALC_CODE_LEN:
+        return False, f"calculation_code exceeds {MAX_CUSTOM_CALC_CODE_LEN} characters"
+
+    forbidden_names = {
+        "__import__", "open", "eval", "exec", "compile", "input",
+        "globals", "locals", "vars", "getattr", "setattr", "delattr"
+    }
+    forbidden_roots = {
+        "os", "sys", "subprocess", "socket", "requests", "boto3", "importlib", "pathlib"
+    }
+
+    try:
+        tree = ast.parse(calculation_code)
+    except SyntaxError as e:
+        return False, f"Syntax error: {str(e)}"
+
+    assigns_result = False
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            return False, "Import statements are not allowed"
+
+        if isinstance(node, ast.Name) and node.id in forbidden_names:
+            return False, f"Forbidden identifier used: {node.id}"
+
+        if isinstance(node, ast.Attribute):
+            if node.attr.startswith('__'):
+                return False, "Dunder attribute access is not allowed"
+            if isinstance(node.value, ast.Name) and node.value.id in forbidden_roots:
+                return False, f"Forbidden module access: {node.value.id}"
+
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in forbidden_names:
+            return False, f"Forbidden function call: {node.func.id}"
+
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == 'result':
+                    assigns_result = True
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and node.target.id == 'result':
+                assigns_result = True
+
+    if not assigns_result:
+        return False, "calculation_code must assign output to 'result'"
+
+    return True, "ok"
+
+
+def _execute_custom_code_with_timeout(calculation_code: str, local_vars: dict, safe_builtins: dict) -> None:
+    """Execute custom code with timeout where possible."""
+    timeout_supported = hasattr(signal, 'SIGALRM') and hasattr(signal, 'alarm')
+    old_handler = None
+
+    def _timeout_handler(signum, frame):
+        raise TimeoutError(f"Calculation exceeded {CUSTOM_CALC_TIMEOUT_SECONDS} second limit")
+
+    try:
+        if timeout_supported:
+            try:
+                old_handler = signal.getsignal(signal.SIGALRM)
+                signal.signal(signal.SIGALRM, _timeout_handler)
+                signal.alarm(CUSTOM_CALC_TIMEOUT_SECONDS)
+            except (ValueError, OSError):
+                # signal.alarm is only available in the main thread on some runtimes.
+                timeout_supported = False
+
+        exec(calculation_code, {"__builtins__": safe_builtins}, local_vars)
+    finally:
+        if timeout_supported:
+            signal.alarm(0)
+            if old_handler is not None:
+                signal.signal(signal.SIGALRM, old_handler)
+
 def get_all_orders(start_date: str, end_date: str) -> List[Dict]:
     """
-    Fetch orders from EasyEcom API with date windowing support
-    
+    Fetch and aggregate daily orders from S3 for a date range.
+
+    S3 layout:
+        s3://chupps-data-portal/orders/YYYY-MM/YYYY-MM-DD.json
+
     IMPORTANT: This function ONLY accepts date range parameters.
     Do NOT pass filtering parameters like payment_mode, marketplace, etc.
     Those filters should be applied AFTER fetching using apply_filters().
@@ -32,63 +128,68 @@ def get_all_orders(start_date: str, end_date: str) -> List[Dict]:
         1. orders = get_all_orders(start_date, end_date)  # Fetch all orders
         2. filtered = apply_filters(orders, [{"field": "payment_mode", "operator": "eq", "value": "PrePaid"}])
     """
-    api_key = os.getenv("EASYECOM_API_KEY")
-    jwt_token = os.getenv("EASYECOM_JWT_TOKEN")
-    base_url = os.getenv("EASYECOM_BASE_URL", "https://api.easyecom.io")
-    
-    if not api_key or not jwt_token:
-        raise ValueError("EASYECOM_API_KEY and EASYECOM_JWT_TOKEN must be set in .env")
-    
-    # Parse dates
     start_dt = datetime.strptime(start_date, "%Y-%m-%d %H:%M:%S")
     end_dt = datetime.strptime(end_date, "%Y-%m-%d %H:%M:%S")
-    
-    # Calculate days difference
-    days_diff = (end_dt - start_dt).days
-    
-    print(f"Date range: {start_date} to {end_date} (Days: {days_diff})")
-    
+
+    if start_dt > end_dt:
+        raise ValueError("start_date must be less than or equal to end_date")
+
+    bucket_name = "chupps-data-portal"
+    root_prefix = "orders"
+
+    print(f"Fetching orders from S3: {start_date} to {end_date}")
+
     all_orders = []
-    
-    # If more than 7 days, implement windowing
-    if days_diff > 7:
-        print(f"Implementing windowing for {days_diff} days (> 7 days)")
-        current_start = start_dt
-        window_num = 1
-        
-        while current_start < end_dt:
-            current_end = min(current_start + timedelta(days=7), end_dt)
-            
-            print(f"Fetching window {window_num}: {current_start} to {current_end}")
-            
-            # Fetch window with pagination
-            window_orders = _fetch_orders_window(
-                current_start.strftime("%Y-%m-%d %H:%M:%S"),
-                current_end.strftime("%Y-%m-%d %H:%M:%S"),
-                api_key,
-                jwt_token,
-                base_url
-            )
-            all_orders.extend(window_orders)
-            print(f"Window {window_num} completed: {len(window_orders)} orders")
-            
-            # Move to next window
-            current_start = current_end
-            window_num += 1
-    else:
-        # Single fetch for <= 7 days with pagination
-        print(f"Fetching all orders for single window ({days_diff} days <= 7)")
-        all_orders = _fetch_orders_window(start_date, end_date, api_key, jwt_token, base_url)
-    
-    print(f"Total orders fetched across all windows/pages: {len(all_orders)}")
+
+    current_day = start_dt.date()
+    end_day = end_dt.date()
+
+    while current_day <= end_day:
+        month_folder = current_day.strftime("%Y-%m")
+        file_name = current_day.strftime("%Y-%m-%d.json")
+        object_key = f"{root_prefix}/{month_folder}/{file_name}"
+
+        try:
+            response = s3.get_object(Bucket=bucket_name, Key=object_key)
+            payload = json.loads(response["Body"].read().decode("utf-8"))
+
+            if isinstance(payload, list):
+                day_orders = payload
+            elif isinstance(payload, dict):
+                if isinstance(payload.get("data"), dict) and isinstance(payload["data"].get("orders"), list):
+                    day_orders = payload["data"]["orders"]
+                elif isinstance(payload.get("orders"), list):
+                    day_orders = payload["orders"]
+                else:
+                    day_orders = [payload]
+            else:
+                day_orders = []
+
+            all_orders.extend(day_orders)
+            print(f"Fetched {len(day_orders)} orders from s3://{bucket_name}/{object_key}")
+        except json.JSONDecodeError as e:
+            print(f"Invalid JSON in s3://{bucket_name}/{object_key}: {e}")
+            raise
+        except Exception as e:
+            error_code = None
+            if hasattr(e, "response") and isinstance(getattr(e, "response"), dict):
+                error_code = e.response.get("Error", {}).get("Code")
+
+            if error_code in {"NoSuchKey", "404", "NotFound"}:
+                print(f"No file found for {current_day}: s3://{bucket_name}/{object_key}")
+            else:
+                print(f"Error fetching s3://{bucket_name}/{object_key}: {e}")
+                raise
+
+        current_day += timedelta(days=1)
+
+    print(f"Total orders fetched across all S3 daily files: {len(all_orders)}")
     return all_orders
 
 #for any metric, data calculation, first convert to dataframe and then continue.
 def convert_to_df(raw: list) -> pd.DataFrame:
     """Convert raw JSON order data to normalized DataFrame"""
     
-    #raw = PYTHON LIST
-
     orders = []
     try:
         # If raw is a JSON string, parse it first
@@ -574,6 +675,25 @@ def execute_custom_calculation(table: pd.DataFrame, calculation_code: str, metri
         execute_custom_calculation(orders_df, code, "avg_customer_value")
     """
     try:
+        # Validate metric_name format
+        if not _is_valid_metric_name(metric_name):
+            return {
+                metric_name if isinstance(metric_name, str) and metric_name else "custom_metric": None,
+                "error": "Invalid metric_name. Use alphanumeric characters and underscores only.",
+                "calculation_code": calculation_code[:500] if isinstance(calculation_code, str) else "",
+                "success": False
+            }
+
+        # Validate custom code AST and constraints
+        is_valid, validation_message = _validate_custom_calculation_code(calculation_code)
+        if not is_valid:
+            return {
+                metric_name: None,
+                "error": f"Code validation failed: {validation_message}",
+                "calculation_code": calculation_code[:500],
+                "success": False
+            }
+
         # Validate input
         if table.empty:
             return {
@@ -619,7 +739,7 @@ def execute_custom_calculation(table: pd.DataFrame, calculation_code: str, metri
         }
         
         # Execute the custom code with restricted environment
-        exec(calculation_code, {"__builtins__": safe_builtins}, local_vars)
+        _execute_custom_code_with_timeout(calculation_code, local_vars, safe_builtins)
         
         # Get the result (code should assign to 'result' variable)
         result = local_vars.get('result', None)
@@ -631,6 +751,15 @@ def execute_custom_calculation(table: pd.DataFrame, calculation_code: str, metri
                 "calculation_code": calculation_code,
                 "success": False
             }
+
+        result_size = sys.getsizeof(result)
+        if result_size > MAX_CUSTOM_RESULT_SIZE:
+            return {
+                metric_name: None,
+                "error": f"Result too large ({result_size} bytes). Max allowed: {MAX_CUSTOM_RESULT_SIZE} bytes",
+                "calculation_code": calculation_code[:500],
+                "success": False
+            }
         
         result = convert_numpy_types(result)
         
@@ -640,11 +769,18 @@ def execute_custom_calculation(table: pd.DataFrame, calculation_code: str, metri
             "success": True
         }
         
+    except TimeoutError as e:
+        return {
+            metric_name: None,
+            "error": str(e),
+            "calculation_code": calculation_code[:500] if isinstance(calculation_code, str) else "",
+            "success": False
+        }
     except Exception as e:
         return {
             metric_name: None,
             "error": f"Calculation error: {str(e)}",
-            "calculation_code": calculation_code,
+            "calculation_code": calculation_code[:500] if isinstance(calculation_code, str) else "",
             "success": False
         }
 
