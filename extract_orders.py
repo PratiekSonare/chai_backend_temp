@@ -128,7 +128,6 @@ def run_extraction(
     bucket_name: str,
     prefix: str,
     base_url: str,
-    aws_profile: str,
 ) -> None:
     """Extract orders day-by-day and upload each day to S3."""
     api_key = os.getenv("EASYECOM_API_KEY")
@@ -140,15 +139,7 @@ def run_extraction(
     if start_day > end_day:
         raise ValueError("start_date must be less than or equal to end_date")
 
-    session = boto3.Session(profile_name=aws_profile) if aws_profile else boto3.Session()
-    credentials = session.get_credentials()
-    if credentials is None:
-        raise ValueError(
-            "AWS credentials not found. Configure one of: "
-            "AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, AWS_PROFILE, or an IAM role."
-        )
-
-    s3_client = session.client("s3")
+    s3_client = boto3.client("s3")
 
     current_day = start_day
     total_orders = 0
@@ -196,7 +187,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bucket", default=DEFAULT_BUCKET, help=f"S3 bucket (default: {DEFAULT_BUCKET})")
     parser.add_argument("--prefix", default=DEFAULT_PREFIX, help=f"S3 prefix (default: {DEFAULT_PREFIX})")
     parser.add_argument("--base-url", default=os.getenv("EASYECOM_BASE_URL", DEFAULT_BASE_URL), help="EasyEcom API base URL")
-    parser.add_argument("--aws-profile", default=os.getenv("AWS_PROFILE"), help="AWS CLI profile name (optional)")
     return parser
 
 
@@ -213,7 +203,6 @@ def main() -> None:
         bucket_name=args.bucket,
         prefix=args.prefix,
         base_url=args.base_url,
-        aws_profile=args.aws_profile,
     )
 
 
