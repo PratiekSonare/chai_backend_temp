@@ -1,0 +1,15 @@
+[Unit]
+Description=Extract previous day EasyEcom orders and upload to S3
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/chupps/backend
+ExecStart=/home/ubuntu/chupps/backend/run_extract_previous_day.sh
+StandardOutput=append:/var/log/extract-orders.log
+StandardError=append:/var/log/extract-orders.log
+
+[Install]
+WantedBy=multi-user.target

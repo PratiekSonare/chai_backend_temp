@@ -32,6 +32,82 @@ def parse_date(value: str) -> date:
     return datetime.strptime(value, DATE_FMT).date()
 
 
+def _fetch_orders_window(start_date: str, end_date: str, api_key: str, jwt_token: str, base_url: str) -> List[Dict]:
+    """Fetch all orders for a date window with pagination support"""
+    all_orders = []
+    url = f"{base_url}/orders/V2/getAllOrders"
+    
+    params = {
+        "limit": 250,
+        "start_date": start_date,
+        "end_date": end_date
+    }
+    
+    headers = {
+        "x-api-key": api_key,
+        "Authorization": f"Bearer {jwt_token}",
+        "Content-Type": "application/json"
+    }
+    
+    page = 1
+    
+    while True:
+        try:
+            print(f"Fetching page {page} for date range {start_date} to {end_date}")
+            response = requests.get(url, params=params, headers=headers)
+            
+            # Check if we got a 400 Bad Request (end of pagination)
+            if response.status_code == 400:
+                print(f"Reached end of pagination (400 Bad Request) at page {page}")
+                break
+                
+            response.raise_for_status()
+            
+            data = response.json()
+            if data.get("code") != 200 or "data" not in data:
+                print(f"API returned non-200 code or missing data: {data}")
+                break
+            
+            # Extract orders from current page
+            page_orders = data["data"].get("orders", [])
+            if not page_orders:
+                print(f"No orders found on page {page}, ending pagination")
+                break
+                
+            all_orders.extend(page_orders)
+            print(f"Fetched {len(page_orders)} orders from page {page}")
+            
+            # Check for nextUrl to continue pagination
+            next_url = data["data"].get("nextUrl")
+            if not next_url:
+                print(f"No nextUrl found, ending pagination at page {page}")
+                break
+            
+            # Update URL for next request
+            # nextUrl is usually a relative path, so prepend base_url
+            try:
+                if next_url.startswith('/'):
+                    url = f"{base_url}{next_url}"
+                elif next_url.startswith('http'):
+                    url = next_url
+                else:
+                    url = f"{base_url}/{next_url.lstrip('/')}"
+            except Exception as e:
+                print(f"Error processing nextUrl '{next_url}': {e}, ending pagination")
+                break
+            
+            # Clear params for subsequent requests since nextUrl contains all needed parameters
+            params = {}
+            page += 1
+            
+        except requests.exceptions.RequestException as e:
+            print(f"Error fetching orders on page {page}: {e}")
+            break
+    
+    print(f"Total orders fetched for window {start_date} to {end_date}: {len(all_orders)}")
+    return all_orders
+
+
 def fetch_orders_for_window(
     start_date: str,
     end_date: str,

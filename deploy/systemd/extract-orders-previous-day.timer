@@ -1,0 +1,11 @@
+[Unit]
+Description=Run previous day orders extraction daily
+
+[Timer]
+# Runs shortly after day rollover; adjust for your timezone/ops window.
+OnCalendar=*-*-* 00:10:00
+Persistent=true
+Unit=extract-orders-previous-day.service
+
+[Install]
+WantedBy=timers.target
