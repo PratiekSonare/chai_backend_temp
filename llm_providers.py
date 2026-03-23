@@ -549,7 +549,6 @@ Return ONLY the JSON object with the structure based on query type.
         print(f"\\n[DEBUG] ===== TOOL CALLING PLANNING LLM DEBUG =====")
         print(f"[DEBUG] Query: {query}")
         print(f"[DEBUG] Tools being passed: {len(tools)} tools")
-        print(f"[DEBUG] Calling API with tools...")
         
         response = self._call_api_with_tools([{"role": "user", "content": prompt}], tools, temperature=0.3)
         

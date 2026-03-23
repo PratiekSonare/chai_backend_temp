@@ -23,6 +23,7 @@ class AgentState(TypedDict):
     retry_count: int
     logger: Any  # Logger function for SSE
     request_id: str | None  # Request ID for logging
+    cancel_checker: Any  # Callable(request_id) -> bool
     # Comparison-specific fields
     comparison_mode: bool
     comparison_groups: list[dict] | None  # [{group_id, filters}, ...]
@@ -79,6 +80,32 @@ async def gate_next_step(state: AgentState, next_step: str, wait_ms: int = 500) 
         wait_ms=wait_ms,
     )
     await asyncio.sleep(wait_ms / 1000)
+
+
+REQUEST_CANCELLED_ERROR = "Request cancelled by client"
+
+
+def _is_request_cancelled(state: AgentState) -> bool:
+    checker = state.get("cancel_checker")
+    if not checker:
+        return False
+    try:
+        return bool(checker(state.get("request_id")))
+    except Exception:
+        return False
+
+
+async def _cancelled_state(state: AgentState, step_key: str, summary: str) -> AgentState:
+    await emit_step_event(
+        state,
+        step_key,
+        summary,
+        status="CANCELLED",
+    )
+    return {
+        **state,
+        "error": REQUEST_CANCELLED_ERROR,
+    }
 
 def cache_result(data: dict | list, key: str) -> str:
     """Cache result and return reference key"""
@@ -216,6 +243,9 @@ def extract_schema_with_enums(data: dict | list, sample_size: int = 100) -> dict
 # Node functions
 async def planning_node(state: AgentState) -> AgentState:
     """Planning LLM generates execution plan"""
+    if _is_request_cancelled(state):
+        return await _cancelled_state(state, "PLANNING_CANCELLED", "Planning skipped due to cancellation")
+
     await emit_step_event(
         state,
         "PLANNING_START",
@@ -226,7 +256,7 @@ async def planning_node(state: AgentState) -> AgentState:
     
     print(f"🧠 [PLANNING] Query: '{state['user_query'][:60]}...' | Error: {state.get('error', 'None')}", flush=True)
     try:
-        await gate_next_step(state, "Calling planning model...", wait_ms=500)
+        await gate_next_step(state, "Generating a plan...", wait_ms=500)
         # Call your planning LLM here
         plan_response = planning_llm.invoke(state["user_query"])
         
@@ -281,6 +311,9 @@ async def execute_tool_node(state: AgentState) -> AgentState:
     """
     step_idx = state["current_step_index"]
     total_steps = len(state["plan"]["steps"]) if state["plan"] else 0
+
+    if _is_request_cancelled(state):
+        return await _cancelled_state(state, "EXECUTE_CANCELLED", "Step execution skipped due to cancellation")
     
     await emit_step_event(
         state,
@@ -318,6 +351,9 @@ async def execute_tool_node(state: AgentState) -> AgentState:
         
         # Emit next-step event, wait 500ms, then execute tool.
         await gate_next_step(state, f"Executing {step['tool']}...", wait_ms=500)
+        if _is_request_cancelled(state):
+            return await _cancelled_state(state, "EXECUTE_CANCELLED", "Step execution cancelled before tool run")
+
         await emit_step_event(
             state,
             "TOOL_EXECUTION_START",
@@ -331,6 +367,9 @@ async def execute_tool_node(state: AgentState) -> AgentState:
             return {**state, "error": f"Tool {step['tool']} not found"}
 
         result = tool_function(**resolved_params)
+
+        if _is_request_cancelled(state):
+            return await _cancelled_state(state, "EXECUTE_CANCELLED", "Step execution cancelled after tool run")
         
         # Log successful execution
         if isinstance(result, list):
@@ -392,7 +431,7 @@ async def execute_tool_node(state: AgentState) -> AgentState:
             status="ERROR",
             details=str(e),
         )
-        if state["retry_count"] < 2:
+        if state["retry_count"] < 1:
             return {
                 **state,
                 "retry_count": state["retry_count"] + 1,
@@ -418,7 +457,7 @@ async def filtering_node(state: AgentState) -> AgentState:
         last_step = plan["steps"][-1]
         schema = state["tool_result_schemas"][last_step["save_as"]]
 
-        await gate_next_step(state, "Calling filtering model...", wait_ms=500)
+        await gate_next_step(state, "Filtering data...", wait_ms=500)
         
         # Call filtering LLM with schema including enum values
         # LLM can now learn: "prepaid" -> "PrePaid" from enum list
@@ -487,6 +526,9 @@ def apply_filters_node(state: AgentState) -> AgentState:
 
 def no_filter_node(state: AgentState) -> AgentState:
     """Direct output when no filtering needed"""
+    if _is_request_cancelled(state):
+        return {**state, "error": REQUEST_CANCELLED_ERROR}
+
     print(f"➡️  [NO_FILTER] Skipping filters, returning raw results", flush=True)
     
     plan = state["plan"]
@@ -506,6 +548,9 @@ def no_filter_node(state: AgentState) -> AgentState:
 
 def metric_processing_node(state: AgentState) -> AgentState:
     """Execute metric calculations based on the plan"""
+    if _is_request_cancelled(state):
+        return {**state, "error": REQUEST_CANCELLED_ERROR}
+
     print(f"📊 [METRIC_PROCESSING] Executing metric calculations", flush=True)
     
     try:
@@ -596,6 +641,9 @@ def metric_processing_node(state: AgentState) -> AgentState:
 
 async def grouping_node(state: AgentState) -> AgentState:
     """Identify comparison groups and create parallel execution branches"""
+    if _is_request_cancelled(state):
+        return await _cancelled_state(state, "GROUPING_CANCELLED", "Grouping skipped due to cancellation")
+
     print(f"🔀 [GROUPING] Identifying comparison groups", flush=True)
     
     try:
@@ -606,7 +654,7 @@ async def grouping_node(state: AgentState) -> AgentState:
             status="START",
         )
 
-        await gate_next_step(state, "Calling grouping model...", wait_ms=500)
+        await gate_next_step(state, "Grouping data...", wait_ms=500)
         # Call grouping LLM to extract comparison dimensions
         grouping_response = grouping_llm.invoke({
             "query": state["user_query"],
@@ -655,6 +703,9 @@ async def grouping_node(state: AgentState) -> AgentState:
 
 async def parallel_fetch_node(state: AgentState) -> AgentState:
     """Execute data fetches for current comparison group"""
+    if _is_request_cancelled(state):
+        return await _cancelled_state(state, "PARALLEL_FETCH_CANCELLED", "Group fetch skipped due to cancellation")
+
     current_idx = state["current_group_index"]
     total_groups = len(state["comparison_groups"]) if state["comparison_groups"] else 0
     group_id = state["comparison_groups"][current_idx]["group_id"] if state["comparison_groups"] else "unknown"
@@ -680,9 +731,14 @@ async def parallel_fetch_node(state: AgentState) -> AgentState:
             return {**state, "error": f"Tool {plan['tool']} not found"}
 
         await gate_next_step(state, f"Executing {plan['tool']} for {group_id}...", wait_ms=500)
+        if _is_request_cancelled(state):
+            return await _cancelled_state(state, "PARALLEL_FETCH_CANCELLED", "Group fetch cancelled before tool run")
         
         # Fetch data using only base parameters (date range)
         result = tool_function(**plan["base_params"])
+
+        if _is_request_cancelled(state):
+            return await _cancelled_state(state, "PARALLEL_FETCH_CANCELLED", "Group fetch cancelled after tool run")
         
         # Apply group-specific filters to the fetched data
         # This is where payment_mode, marketplace, etc. filtering happens
@@ -735,6 +791,9 @@ async def parallel_fetch_node(state: AgentState) -> AgentState:
 
 def aggregation_node(state: AgentState) -> AgentState:
     """Compute metrics for each comparison group"""
+    if _is_request_cancelled(state):
+        return {**state, "error": REQUEST_CANCELLED_ERROR}
+
     num_groups = len(state.get("group_results", {}))
     print(f"📈 [AGGREGATION] Computing metrics for {num_groups} group(s)", flush=True)
     
@@ -810,6 +869,9 @@ def aggregation_node(state: AgentState) -> AgentState:
 
 def comparison_node(state: AgentState) -> AgentState:
     """Perform comparison logic between groups"""
+    if _is_request_cancelled(state):
+        return {**state, "error": REQUEST_CANCELLED_ERROR}
+
     print(f"⚖️  [COMPARISON] Comparing groups", flush=True)
     
     try:
@@ -927,6 +989,9 @@ def comparison_node(state: AgentState) -> AgentState:
 
 async def insight_generation_node(state: AgentState) -> AgentState:
     """Generate natural language insights for comparison and metric analysis."""
+    if _is_request_cancelled(state):
+        return await _cancelled_state(state, "INSIGHT_CANCELLED", "Insight generation skipped due to cancellation")
+
     print(f"💡 [INSIGHTS] Generating natural language summary", flush=True)
     
     try:
@@ -965,7 +1030,10 @@ async def insight_generation_node(state: AgentState) -> AgentState:
         if not normalized_metrics and is_metric_query and state.get("metric_results"):
             normalized_metrics = {"overall": state["metric_results"]}
 
-        await gate_next_step(state, "Calling insight model...", wait_ms=500)
+        await gate_next_step(state, "Generating intelligent insights...", wait_ms=500)
+        if _is_request_cancelled(state):
+            return await _cancelled_state(state, "INSIGHT_CANCELLED", "Insight generation cancelled before LLM call")
+
         insight_response = insight_llm.invoke({
             "query": state["user_query"],
             "metrics": normalized_metrics or {},

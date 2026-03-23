@@ -19,7 +19,7 @@ if [ -f "$SCRIPT_DIR/venv/bin/activate" ]; then
 fi
 
 # Default timezone can be overridden (example: EXTRACT_TZ=Asia/Kolkata).
-EXTRACT_TZ="${EXTRACT_TZ:-UTC}"
+EXTRACT_TZ="Asia/Kolkata"
 RUN_DATE="$(TZ="$EXTRACT_TZ" date -d 'yesterday' +%F)"
 
 echo "[$(date -Iseconds)] Starting previous-day extraction for $RUN_DATE (TZ=$EXTRACT_TZ)"

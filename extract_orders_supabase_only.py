@@ -1,26 +1,21 @@
-"""Extract daily orders from EasyEcom API and upload to S3.
+"""Extract daily orders from EasyEcom API and upload only to Supabase.
 
-S3 output format:
-- Bucket: chupps-data-portal
-- Prefix: orders/YYYY-MM/YYYY-MM-DD.json
+This variant intentionally skips S3 writes to avoid creating/updating bucket objects.
 """
 
 import argparse
 import json
 import os
 import re
-from datetime import datetime, timedelta, date
+from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Set
 
-import boto3
 import requests
 from dotenv import load_dotenv
 from supabase import Client, create_client
 
 
 DEFAULT_BASE_URL = "https://api.easyecom.io"
-DEFAULT_BUCKET = "chupps-data-portal"
-DEFAULT_PREFIX = "orders"
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M:%S"
 TARGET_TABLE = "history_orders_raw"
@@ -35,82 +30,6 @@ load_dotenv()
 def parse_date(value: str) -> date:
     """Parse date in YYYY-MM-DD format."""
     return datetime.strptime(value, DATE_FMT).date()
-
-
-def _fetch_orders_window(start_date: str, end_date: str, api_key: str, jwt_token: str, base_url: str) -> List[Dict]:
-    """Fetch all orders for a date window with pagination support"""
-    all_orders = []
-    url = f"{base_url}/orders/V2/getAllOrders"
-    
-    params = {
-        "limit": 250,
-        "start_date": start_date,
-        "end_date": end_date
-    }
-    
-    headers = {
-        "x-api-key": api_key,
-        "Authorization": f"Bearer {jwt_token}",
-        "Content-Type": "application/json"
-    }
-    
-    page = 1
-    
-    while True:
-        try:
-            print(f"Fetching page {page} for date range {start_date} to {end_date}")
-            response = requests.get(url, params=params, headers=headers)
-            
-            # Check if we got a 400 Bad Request (end of pagination)
-            if response.status_code == 400:
-                print(f"Reached end of pagination (400 Bad Request) at page {page}")
-                break
-                
-            response.raise_for_status()
-            
-            data = response.json()
-            if data.get("code") != 200 or "data" not in data:
-                print(f"API returned non-200 code or missing data: {data}")
-                break
-            
-            # Extract orders from current page
-            page_orders = data["data"].get("orders", [])
-            if not page_orders:
-                print(f"No orders found on page {page}, ending pagination")
-                break
-                
-            all_orders.extend(page_orders)
-            print(f"Fetched {len(page_orders)} orders from page {page}")
-            
-            # Check for nextUrl to continue pagination
-            next_url = data["data"].get("nextUrl")
-            if not next_url:
-                print(f"No nextUrl found, ending pagination at page {page}")
-                break
-            
-            # Update URL for next request
-            # nextUrl is usually a relative path, so prepend base_url
-            try:
-                if next_url.startswith('/'):
-                    url = f"{base_url}{next_url}"
-                elif next_url.startswith('http'):
-                    url = next_url
-                else:
-                    url = f"{base_url}/{next_url.lstrip('/')}"
-            except Exception as e:
-                print(f"Error processing nextUrl '{next_url}': {e}, ending pagination")
-                break
-            
-            # Clear params for subsequent requests since nextUrl contains all needed parameters
-            params = {}
-            page += 1
-            
-        except requests.exceptions.RequestException as e:
-            print(f"Error fetching orders on page {page}: {e}")
-            break
-    
-    print(f"Total orders fetched for window {start_date} to {end_date}: {len(all_orders)}")
-    return all_orders
 
 
 def fetch_orders_for_window(
@@ -181,28 +100,6 @@ def fetch_orders_for_window(
     return all_orders
 
 
-def upload_daily_orders(
-    s3_client,
-    bucket_name: str,
-    prefix: str,
-    day: date,
-    orders: List[Dict],
-) -> str:
-    """Upload one day's orders in exact key format orders/YYYY-MM/YYYY-MM-DD.json."""
-    month_folder = day.strftime("%Y-%m")
-    file_name = f"{day.strftime(DATE_FMT)}.json"
-    key = f"{prefix}/{month_folder}/{file_name}"
-
-    body = json.dumps(orders, ensure_ascii=True)
-    s3_client.put_object(
-        Bucket=bucket_name,
-        Key=key,
-        Body=body,
-        ContentType="application/json",
-    )
-    return key
-
-
 def create_supabase_client() -> Client:
     """Create Supabase client from environment variables."""
     supabase_url = os.getenv("SUPABASE_URL")
@@ -258,11 +155,11 @@ def load_allowed_columns(schema_file_path: str = SCHEMA_FILE) -> Optional[Set[st
 
 def prepare_rows_for_supabase(
     orders: List[Dict],
-    source_key: str,
+    source_tag: str,
     source_month: str,
     allowed_columns: Optional[Set[str]] = None,
 ) -> List[Dict]:
-    """Prepare daily rows and add lightweight lineage columns."""
+    """Prepare rows and add lineage metadata."""
     prepared_rows: List[Dict] = []
 
     for order in orders:
@@ -279,7 +176,7 @@ def prepare_rows_for_supabase(
             row = {key: normalize_for_supabase(value) for key, value in order.items()}
 
         if not allowed_columns or "source_file" in allowed_columns:
-            row["source_file"] = source_key
+            row["source_file"] = source_tag
         if not allowed_columns or "source_month" in allowed_columns:
             row["source_month"] = source_month
 
@@ -297,7 +194,7 @@ def insert_orders_into_supabase(
     rows: List[Dict],
     chunk_size: int = DEFAULT_INSERT_CHUNK_SIZE,
 ) -> int:
-    """Insert rows into Supabase in chunks to avoid oversized payloads."""
+    """Insert rows into Supabase in chunks."""
     if not rows:
         return 0
 
@@ -323,12 +220,10 @@ def insert_orders_into_supabase(
 def run_extraction(
     start_day: date,
     end_day: date,
-    bucket_name: str,
-    prefix: str,
     base_url: str,
     table_name: str,
 ) -> None:
-    """Extract orders day-by-day and upload each day to S3."""
+    """Extract orders day-by-day and upload each day only to Supabase."""
     api_key = os.getenv("EASYECOM_API_KEY")
     jwt_token = os.getenv("EASYECOM_JWT_TOKEN")
 
@@ -338,13 +233,11 @@ def run_extraction(
     if start_day > end_day:
         raise ValueError("start_date must be less than or equal to end_date")
 
-    s3_client = boto3.client("s3")
     supabase_client = create_supabase_client()
     allowed_columns = load_allowed_columns()
 
     current_day = start_day
     total_orders = 0
-    total_files = 0
 
     while current_day <= end_day:
         day_start = datetime.combine(current_day, datetime.min.time()).strftime(DATETIME_FMT)
@@ -359,20 +252,14 @@ def run_extraction(
             base_url=base_url,
         )
 
-        key = upload_daily_orders(
-            s3_client=s3_client,
-            bucket_name=bucket_name,
-            prefix=prefix,
-            day=current_day,
-            orders=daily_orders,
-        )
-
+        source_tag = f"supabase_only/{current_day.strftime(DATE_FMT)}.json"
         rows_for_supabase = prepare_rows_for_supabase(
             orders=daily_orders,
-            source_key=key,
+            source_tag=source_tag,
             source_month=current_day.strftime("%Y-%m"),
             allowed_columns=allowed_columns,
         )
+
         inserted_count = insert_orders_into_supabase(
             supabase=supabase_client,
             table_name=table_name,
@@ -381,26 +268,26 @@ def run_extraction(
 
         day_count = len(daily_orders)
         total_orders += day_count
-        total_files += 1
 
-        # print(f"Uploaded {day_count} orders to s3://{bucket_name}/{key}")
+        print(f"Fetched {day_count} orders")
         print(f"Inserted {inserted_count} rows into Supabase table '{table_name}'")
         current_day += timedelta(days=1)
 
     print("\nExtraction complete")
-    print(f"Files uploaded: {total_files}")
-    print(f"Total orders uploaded: {total_orders}")
+    print(f"Total orders fetched: {total_orders}")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Extract daily EasyEcom orders and upload to S3 in month/day JSON structure"
+        description="Extract daily EasyEcom orders and upload only to Supabase"
     )
     parser.add_argument("--start-date", required=True, help="Start date in YYYY-MM-DD")
     parser.add_argument("--end-date", required=True, help="End date in YYYY-MM-DD")
-    parser.add_argument("--bucket", default=DEFAULT_BUCKET, help=f"S3 bucket (default: {DEFAULT_BUCKET})")
-    parser.add_argument("--prefix", default=DEFAULT_PREFIX, help=f"S3 prefix (default: {DEFAULT_PREFIX})")
-    parser.add_argument("--base-url", default=os.getenv("EASYECOM_BASE_URL", DEFAULT_BASE_URL), help="EasyEcom API base URL")
+    parser.add_argument(
+        "--base-url",
+        default=os.getenv("EASYECOM_BASE_URL", DEFAULT_BASE_URL),
+        help="EasyEcom API base URL",
+    )
     parser.add_argument(
         "--table",
         default=os.getenv("SUPABASE_TARGET_TABLE", TARGET_TABLE),
@@ -419,8 +306,6 @@ def main() -> None:
     run_extraction(
         start_day=start_day,
         end_day=end_day,
-        bucket_name=args.bucket,
-        prefix=args.prefix,
         base_url=args.base_url,
         table_name=args.table,
     )

@@ -17,7 +17,6 @@ from utils.type_converters import convert_numpy_types
 
 s3 = boto3.client('s3')
 
-
 MAX_CUSTOM_CALC_CODE_LEN = 4000
 MAX_CUSTOM_RESULT_SIZE = 10_000_000
 CUSTOM_CALC_TIMEOUT_SECONDS = 5
@@ -886,9 +885,9 @@ def _fetch_orders_window(start_date: str, end_date: str, api_key: str, jwt_token
     return all_orders
 
 
-def apply_filters(data: List[Dict], filters: List[Dict]) -> List[Dict]:
+def apply_filters(table: List[Dict], filters: List[Dict]) -> List[Dict]:
     """
-    Apply filters to order data
+    Apply filters to order table
     
     Args:
         data: List of order records
@@ -899,7 +898,7 @@ def apply_filters(data: List[Dict], filters: List[Dict]) -> List[Dict]:
         Filtered list of orders
     """
     if not filters:
-        return data
+        return table
     
     # Fields that are nested in suborders[] array
     NESTED_FIELDS = {
@@ -911,7 +910,7 @@ def apply_filters(data: List[Dict], filters: List[Dict]) -> List[Dict]:
         "suborder_reference_num", "weight", "height", "length", "width"
     }
     
-    filtered_data = data
+    filtered_data = table
     
     for filter_spec in filters:
         field = filter_spec.get("field")
@@ -1032,8 +1031,8 @@ def apply_filters(data: List[Dict], filters: List[Dict]) -> List[Dict]:
                 
                 # Show first few actual values for debugging
                 if before_count > 0 and len(filtered_data) == 0:
-                    sample_values = [r.get(field) for r in data[:5]]
-                    print(f"[DEBUG FILTER] Sample values in data: {sample_values}", flush=True)
+                    sample_values = [r.get(field) for r in table[:5]]
+                    print(f"[DEBUG FILTER] Sample values in table: {sample_values}", flush=True)
             else:
                 filtered_data = [r for r in filtered_data if r.get(field) == value]
         elif operator == "ne":

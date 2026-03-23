@@ -1,4 +1,5 @@
 import uuid
+import threading
 import numpy as np
 import pandas as pd
 from decimal import Decimal
@@ -49,6 +50,45 @@ def convert_numpy_types(obj):
 
 router = APIRouter()
 
+REQUEST_CANCELLED_ERROR = "Request cancelled by client"
+_QUERY_CANCEL_REGISTRY: dict[str, dict] = {}
+_QUERY_CANCEL_LOCK = threading.Lock()
+
+
+def register_active_query(request_id: str) -> None:
+    with _QUERY_CANCEL_LOCK:
+        _QUERY_CANCEL_REGISTRY[request_id] = {
+            "cancelled": False,
+            "reason": None,
+        }
+
+
+def mark_query_cancelled(request_id: str, reason: str = "client_cancelled") -> bool:
+    with _QUERY_CANCEL_LOCK:
+        entry = _QUERY_CANCEL_REGISTRY.get(request_id)
+        was_cancelled = bool(entry and entry.get("cancelled"))
+        if entry is None:
+            _QUERY_CANCEL_REGISTRY[request_id] = {
+                "cancelled": True,
+                "reason": reason,
+            }
+        else:
+            entry["cancelled"] = True
+            entry["reason"] = reason
+        return not was_cancelled
+
+
+def is_query_cancelled(request_id: str | None) -> bool:
+    if not request_id:
+        return False
+    with _QUERY_CANCEL_LOCK:
+        return bool(_QUERY_CANCEL_REGISTRY.get(request_id, {}).get("cancelled"))
+
+
+def clear_query_registry_entry(request_id: str) -> None:
+    with _QUERY_CANCEL_LOCK:
+        _QUERY_CANCEL_REGISTRY.pop(request_id, None)
+
 
 @router.get('/query/logs/{request_id}')
 async def get_query_logs(request_id: str, since: int = 0):
@@ -58,6 +98,37 @@ async def get_query_logs(request_id: str, since: int = 0):
         "request_id": request_id,
         "logs": logs,
         "next_sequence": get_latest_sequence(request_id)
+    }
+
+
+@router.post('/query/{request_id}/cancel')
+async def cancel_query(request_id: str, raw_request: Request):
+    reason = "client_cancelled"
+
+    try:
+        payload = await raw_request.json()
+        if isinstance(payload, dict) and payload.get("reason"):
+            reason = str(payload.get("reason"))[:120]
+    except Exception:
+        # sendBeacon may send empty/non-JSON bodies; default reason is fine.
+        pass
+
+    first_cancel = mark_query_cancelled(request_id, reason=reason)
+
+    append_request_log(
+        request_id=request_id,
+        step_key="REQUEST_CANCELLED",
+        summary="Cancellation requested",
+        details=reason,
+        status="CANCELLED"
+    )
+
+    return {
+        "success": True,
+        "request_id": request_id,
+        "cancelled": True,
+        "reason": reason,
+        "already_cancelled": not first_cancel,
     }
 
 @router.post('/plan')
@@ -129,6 +200,24 @@ async def process_query(
         details=user_query[:200],
         status="START"
     )
+
+    register_active_query(request_id)
+
+    if is_query_cancelled(request_id):
+        append_request_log(
+            request_id=request_id,
+            step_key="REQUEST_SKIPPED",
+            summary="Query was already cancelled before execution",
+            status="CANCELLED"
+        )
+        clear_query_registry_entry(request_id)
+        return {
+            "success": False,
+            "request_id": request_id,
+            "cancelled": True,
+            "error": REQUEST_CANCELLED_ERROR,
+            "logs": read_request_logs(request_id),
+        }
     
     try:
         async def workflow_logger(
@@ -160,6 +249,7 @@ async def process_query(
             retry_count=0,
             logger=workflow_logger,
             request_id=request_id,
+            cancel_checker=is_query_cancelled,
             comparison_mode=False,  # Will be set by planning LLM
             comparison_groups=None,
             group_results=None,
@@ -169,7 +259,8 @@ async def process_query(
             comparison_results=None,
             insights=None,
             metric_results=None,
-            metric_analysis=None
+            metric_analysis=None,
+            metrics_calculated=None
         )
         
         # Run workflow
@@ -183,8 +274,38 @@ async def process_query(
             status="COMPLETE"
         )
 
+        if is_query_cancelled(request_id):
+            append_request_log(
+                request_id=request_id,
+                step_key="WORKFLOW_CANCELLED",
+                summary="Workflow stopped due to cancellation",
+                status="CANCELLED"
+            )
+            return {
+                "success": False,
+                "request_id": request_id,
+                "cancelled": True,
+                "error": REQUEST_CANCELLED_ERROR,
+                "logs": read_request_logs(request_id),
+            }
+
         # Check for errors
         if result.get("error"):
+            if result.get("error") == REQUEST_CANCELLED_ERROR:
+                append_request_log(
+                    request_id=request_id,
+                    step_key="WORKFLOW_CANCELLED",
+                    summary="Workflow stopped due to cancellation",
+                    status="CANCELLED"
+                )
+                return {
+                    "success": False,
+                    "request_id": request_id,
+                    "cancelled": True,
+                    "error": REQUEST_CANCELLED_ERROR,
+                    "logs": read_request_logs(request_id),
+                }
+
             append_request_log(
                 request_id=request_id,
                 step_key="WORKFLOW_ERROR",
@@ -371,29 +492,6 @@ async def process_query(
                 "request_id": request_id
             }
         )
-        
-    except HTTPException as http_error:
-        append_request_log(
-            request_id=request_id,
-            step_key="REQUEST_ERROR",
-            summary="HTTP exception in /query",
-            details=str(http_error.detail),
-            status="ERROR"
-        )
-        raise http_error
 
-    except Exception as e:
-        append_request_log(
-            request_id=request_id,
-            step_key="REQUEST_ERROR",
-            summary="Unhandled exception in /query",
-            details=str(e),
-            status="ERROR"
-        )
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "success": False,
-                "error": str(e)
-            }
-        )
+    finally:
+        clear_query_registry_entry(request_id)

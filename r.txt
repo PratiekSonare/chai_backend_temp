@@ -8,3 +8,4 @@ langchain-core
 redis
 pandas
 boto3
+supabase

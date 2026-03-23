@@ -126,16 +126,17 @@ def calculate_orders_metrics(request: OrdersMetricsRequest):
         }
         
         # ============ CANCELLATION METRICS ============
-        cancelled_orders = len(df[df['order_status'] == 'Cancelled']) if 'order_status' in df.columns else 0
+        normalized_status = df['order_status'].astype(str).str.strip().str.lower() if 'order_status' in df.columns else pd.Series([], dtype='string')
+        cancelled_orders = int((normalized_status == 'cancelled').sum()) if 'order_status' in df.columns else 0
         cancellation_rate = (cancelled_orders / total_orders * 100) if total_orders > 0 else 0
         
-        # RTO Rate calculation (assuming RTO orders have specific status)
-        rto_orders = len(df[df['order_status'].str.contains('RTO|Return', case=False, na=False)]) if 'order_status' in df.columns else 0
+        # Keep response field name for backward compatibility; with current status taxonomy this maps to Returned.
+        rto_orders = int((normalized_status == 'returned').sum()) if 'order_status' in df.columns else 0
         rto_rate = (rto_orders / total_orders * 100) if total_orders > 0 else 0
         
         # Highest state RTO
         if 'state' in df.columns and 'order_status' in df.columns:
-            state_rto = df[df['order_status'].str.contains('RTO|Return', case=False, na=False)]['state'].value_counts()
+            state_rto = df[normalized_status == 'returned']['state'].value_counts()
             highest_state_rto = state_rto.index[0] if len(state_rto) > 0 else None
         else:
             highest_state_rto = None
@@ -194,7 +195,7 @@ def calculate_orders_metrics(request: OrdersMetricsRequest):
         
         cancellation_by_state = {}
         if 'state' in df.columns and 'order_status' in df.columns:
-            cancelled_by_state = df[df['order_status'] == 'Cancelled'].groupby('state').size()
+            cancelled_by_state = df[normalized_status == 'cancelled'].groupby('state').size()
             total_by_state = df.groupby('state').size()
             cancellation_by_state = ((cancelled_by_state / total_by_state) * 100).fillna(0).to_dict()
         
