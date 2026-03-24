@@ -161,10 +161,10 @@ def _build_projection_expression(columns: list[str]) -> tuple[str, Dict[str, str
 # ============ DYNAMODB DATA FETCHING ============
 def fetch_historical_orders(request: HistoryOrdersRequest) -> pd.DataFrame:
     """
-    Fetch historical orders from Supabase
+    Fetch historical orders from DynamoDB
     
     Args:
-        table_name: Name of the table in Supabase
+        table_name: Name of the table in DynamoDB
         start_date: Start date filter (ISO format)
         end_date: End date filter (ISO format)
         filters: Additional column filters
@@ -251,7 +251,9 @@ def preview_historical_orders(request: HistoryOrdersRequest):
     try:
         df = fetch_historical_orders(request)
 
-        preview_df = df.head(3)
+        preview_df = df.head(3).reindex(columns=REQUIRED_COLUMNS)
+        preview_df = preview_df.where(pd.notna(preview_df), None)
+
 
         return convert_numpy_types({
             "success": True,
@@ -259,6 +261,7 @@ def preview_historical_orders(request: HistoryOrdersRequest):
             "total_rows_fetched": int(len(df)),
             "preview_count": int(len(preview_df)),
             "data": preview_df.to_dict(orient='records'),
+            "columns": REQUIRED_COLUMNS,
             "timestamp": datetime.now().isoformat()
         })
 
@@ -504,6 +507,269 @@ async def kpi_all(request: HistoryOrdersRequest):
             status_code=500,
             detail=f"Error calculating KPIs: {str(e)}"
         )
+
+
+# ============ KPI CHART ENDPOINTS ============
+def _parse_iso_datetime(value: Optional[str], field_name: str) -> Optional[datetime]:
+    if value is None:
+        return None
+
+    value_str = str(value).strip()
+    if not value_str:
+        return None
+
+    try:
+        return datetime.fromisoformat(value_str.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid {field_name} format. Use YYYY-MM-DD or full datetime"
+        ) from exc
+
+
+def _granularity_from_request_window(request: HistoryOrdersRequest) -> Optional[str]:
+    start_dt = _parse_iso_datetime(request.start_date, "start_date")
+    end_dt = _parse_iso_datetime(request.end_date, "end_date")
+
+    if start_dt is None or end_dt is None:
+        return None
+
+    if start_dt > end_dt:
+        raise HTTPException(status_code=400, detail="start_date cannot be after end_date")
+
+    window_days = max((end_dt.date() - start_dt.date()).days + 1, 1)
+    if window_days <= 31:
+        return 'daily'
+    if window_days <= 180:
+        return 'weekly'
+    return 'monthly'
+
+
+def _resolve_kpi_chart_granularity(request: HistoryOrdersRequest, df: pd.DataFrame) -> str:
+    requested_window_granularity = _granularity_from_request_window(request)
+    if requested_window_granularity:
+        return requested_window_granularity
+
+    requested_filter_granularity = _request_granularity(request)
+    if requested_filter_granularity:
+        return _resolve_granularity(requested_filter_granularity, pd.Timestamp.now(), pd.Timestamp.now())
+
+    if df.empty or 'order_date' not in df.columns:
+        return 'daily'
+
+    working_dates = pd.to_datetime(df['order_date'], errors='coerce')
+    working_dates = working_dates.dropna()
+    if working_dates.empty:
+        return 'daily'
+
+    return _resolve_granularity(None, working_dates.min(), working_dates.max())
+
+
+def _group_for_kpi_chart(request: HistoryOrdersRequest):
+    df = fetch_historical_orders(request)
+    if df.empty:
+        return df, 'daily', [], pd.DataFrame(), 'date_group'
+
+    chart_type = _resolve_kpi_chart_granularity(request, df)
+    chart_type, labels, grouped_df, group_col = _build_time_groups(df, chart_type)
+    return df, chart_type, labels, grouped_df, group_col
+
+
+def _kpi_chart_response(metric_name: str, unit: str, chart_type: str, labels: list[str], dataset_key: str, values: list[float | int]):
+    return convert_numpy_types({
+        "success": True,
+        "metric_name": metric_name,
+        "chart_type": chart_type,
+        "labels": labels,
+        "datasets": {
+            dataset_key: values
+        },
+        "unit": unit,
+        "timestamp": datetime.now().isoformat()
+    })
+
+
+@router.post('/history/kpi/charts/total-orders')
+def kpi_chart_total_orders(request: HistoryOrdersRequest):
+    """Bar chart data for total orders trend by auto-selected granularity."""
+    try:
+        _, chart_type, labels, grouped_df, group_col = _group_for_kpi_chart(request)
+        if grouped_df.empty:
+            return _kpi_chart_response("Total Orders", "orders", chart_type, [], "totalOrders", [])
+
+        if 'order_id' in grouped_df.columns:
+            grouped = grouped_df.groupby(group_col)['order_id'].nunique().sort_index()
+        else:
+            grouped = grouped_df.groupby(group_col).size().sort_index()
+
+        return _kpi_chart_response("Total Orders", "orders", chart_type, labels, "totalOrders", [int(v) for v in grouped.tolist()])
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating total orders chart: {str(e)}")
+
+
+@router.post('/history/kpi/charts/units-sold')
+def kpi_chart_units_sold(request: HistoryOrdersRequest):
+    """Bar chart data for units sold trend by auto-selected granularity."""
+    try:
+        _, chart_type, labels, grouped_df, group_col = _group_for_kpi_chart(request)
+        if grouped_df.empty:
+            return _kpi_chart_response("Units Sold", "units", chart_type, [], "unitsSold", [])
+
+        grouped_df = _ensure_numeric(grouped_df, ['item_quantity', 'suborder_quantity', 'order_quantity'])
+        if 'item_quantity' in grouped_df.columns:
+            grouped = grouped_df.groupby(group_col)['item_quantity'].sum().sort_index()
+        elif 'suborder_quantity' in grouped_df.columns:
+            grouped = grouped_df.groupby(group_col)['suborder_quantity'].sum().sort_index()
+        elif 'order_quantity' in grouped_df.columns:
+            grouped = grouped_df.groupby(group_col)['order_quantity'].sum().sort_index()
+        else:
+            grouped = grouped_df.groupby(group_col).size().sort_index()
+
+        return _kpi_chart_response("Units Sold", "units", chart_type, labels, "unitsSold", [float(v) for v in grouped.tolist()])
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating units sold chart: {str(e)}")
+
+
+@router.post('/history/kpi/charts/gross-revenue')
+def kpi_chart_gross_revenue(request: HistoryOrdersRequest):
+    """Bar chart data for gross revenue trend by auto-selected granularity."""
+    try:
+        _, chart_type, labels, grouped_df, group_col = _group_for_kpi_chart(request)
+        if grouped_df.empty:
+            return _kpi_chart_response("Gross Revenue", "INR", chart_type, [], "grossRevenue", [])
+
+        grouped_df = _ensure_numeric(grouped_df, ['total_amount'])
+        grouped = grouped_df.groupby(group_col)['total_amount'].sum().sort_index() if 'total_amount' in grouped_df.columns else grouped_df.groupby(group_col).size().sort_index() * 0
+        return _kpi_chart_response("Gross Revenue", "INR", chart_type, labels, "grossRevenue", [float(v) for v in grouped.tolist()])
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating gross revenue chart: {str(e)}")
+
+
+@router.post('/history/kpi/charts/aov')
+def kpi_chart_aov(request: HistoryOrdersRequest):
+    """Bar chart data for AOV trend by auto-selected granularity."""
+    try:
+        _, chart_type, labels, grouped_df, group_col = _group_for_kpi_chart(request)
+        if grouped_df.empty:
+            return _kpi_chart_response("Average Order Value", "INR", chart_type, [], "aov", [])
+
+        grouped_df = _ensure_numeric(grouped_df, ['total_amount'])
+        if 'total_amount' in grouped_df.columns:
+            grouped = grouped_df.groupby(group_col)['total_amount'].mean().sort_index()
+            values = [float(v) for v in grouped.fillna(0).tolist()]
+        else:
+            grouped = grouped_df.groupby(group_col).size().sort_index() * 0
+            values = [0.0 for _ in grouped.tolist()]
+
+        return _kpi_chart_response("Average Order Value", "INR", chart_type, labels, "aov", values)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating AOV chart: {str(e)}")
+
+
+@router.post('/history/kpi/charts/unique-skus')
+def kpi_chart_unique_skus(request: HistoryOrdersRequest):
+    """Bar chart data for unique SKUs trend by auto-selected granularity."""
+    try:
+        _, chart_type, labels, grouped_df, group_col = _group_for_kpi_chart(request)
+        if grouped_df.empty:
+            return _kpi_chart_response("Unique SKUs", "skus", chart_type, [], "uniqueSkus", [])
+
+        if 'sku' in grouped_df.columns:
+            grouped = grouped_df.groupby(group_col)['sku'].nunique().sort_index()
+        else:
+            grouped = grouped_df.groupby(group_col).size().sort_index() * 0
+
+        return _kpi_chart_response("Unique SKUs", "skus", chart_type, labels, "uniqueSkus", [int(v) for v in grouped.tolist()])
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating unique SKUs chart: {str(e)}")
+
+
+@router.post('/history/kpi/charts/cancellation-rate')
+def kpi_chart_cancellation_rate(request: HistoryOrdersRequest):
+    """Bar chart data for cancellation rate trend by auto-selected granularity."""
+    try:
+        _, chart_type, labels, grouped_df, group_col = _group_for_kpi_chart(request)
+        if grouped_df.empty:
+            return _kpi_chart_response("Cancellation Rate", "%", chart_type, [], "cancellationRate", [])
+
+        grouped = grouped_df.groupby(group_col, dropna=False)
+        values = [round(_status_rate(group_df, {'Cancelled'}), 2) for _, group_df in grouped]
+        return _kpi_chart_response("Cancellation Rate", "%", chart_type, labels, "cancellationRate", values)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating cancellation rate chart: {str(e)}")
+
+
+@router.post('/history/kpi/charts/return-rate')
+def kpi_chart_return_rate(request: HistoryOrdersRequest):
+    """Bar chart data for return rate trend by auto-selected granularity."""
+    try:
+        _, chart_type, labels, grouped_df, group_col = _group_for_kpi_chart(request)
+        if grouped_df.empty:
+            return _kpi_chart_response("Return Rate", "%", chart_type, [], "returnRate", [])
+
+        grouped = grouped_df.groupby(group_col, dropna=False)
+        values = [round(_status_rate(group_df, {'Returned'}), 2) for _, group_df in grouped]
+        return _kpi_chart_response("Return Rate", "%", chart_type, labels, "returnRate", values)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating return rate chart: {str(e)}")
+
+
+@router.post('/history/kpi/charts/cod-share')
+def kpi_chart_cod_share(request: HistoryOrdersRequest):
+    """Bar chart data for COD share trend by auto-selected granularity."""
+    try:
+        _, chart_type, labels, grouped_df, group_col = _group_for_kpi_chart(request)
+        if grouped_df.empty:
+            return _kpi_chart_response("COD Share", "%", chart_type, [], "codShare", [])
+
+        if 'payment_mode' not in grouped_df.columns:
+            grouped_df['payment_mode'] = 'UNKNOWN'
+
+        grouped_df['payment_mode_norm'] = grouped_df['payment_mode'].astype(str).str.strip().str.upper()
+        grouped = grouped_df.groupby(group_col, dropna=False)
+
+        values = []
+        for _, group_df in grouped:
+            total = len(group_df)
+            cod_count = int((group_df['payment_mode_norm'] == 'COD').sum())
+            values.append(round(_safe_pct(float(cod_count), float(total)), 2))
+
+        return _kpi_chart_response("COD Share", "%", chart_type, labels, "codShare", values)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating COD share chart: {str(e)}")
+
+
+@router.post('/history/kpi/charts/delivered-rate')
+def kpi_chart_delivered_rate(request: HistoryOrdersRequest):
+    """Bar chart data for delivered rate trend by auto-selected granularity."""
+    try:
+        _, chart_type, labels, grouped_df, group_col = _group_for_kpi_chart(request)
+        if grouped_df.empty:
+            return _kpi_chart_response("Delivered Rate", "%", chart_type, [], "deliveredRate", [])
+
+        grouped = grouped_df.groupby(group_col, dropna=False)
+        values = [round(_status_rate(group_df, {'Delivered'}), 2) for _, group_df in grouped]
+        return _kpi_chart_response("Delivered Rate", "%", chart_type, labels, "deliveredRate", values)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating delivered rate chart: {str(e)}")
 
 
 # ============ KPI CARD ENDPOINTS ============

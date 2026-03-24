@@ -407,140 +407,140 @@ class PlanningLLM(OpenRouterLLM):
         
         # Enhanced prompt with FORMAT EXAMPLES for tool calling
         prompt = f""" You are a query planning assistant for an e-commerce order management system.
-Today's date is {current_date}.
-CRITICAL: Always use actual dates in YYYY-MM-DD HH:MM:SS format, never placeholders.
-- "last 5 days": "{five_days_ago.strftime('%Y-%m-%d')} 00:00:00" to "{today.strftime('%Y-%m-%d')} 23:59:59"
-- "yesterday": "{yesterday.strftime('%Y-%m-%d')} 00:00:00" to "{yesterday.strftime('%Y-%m-%d')} 23:59:59"
-- For chupps.com → "marketplace": "Shopify"
+                    Today's date is {current_date}.
+                    CRITICAL: Always use actual dates in YYYY-MM-DD HH:MM:SS format, never placeholders.
+                    - "last 5 days": "{five_days_ago.strftime('%Y-%m-%d')} 00:00:00" to "{today.strftime('%Y-%m-%d')} 23:59:59"
+                    - "yesterday": "{yesterday.strftime('%Y-%m-%d')} 00:00:00" to "{yesterday.strftime('%Y-%m-%d')} 23:59:59"
+                    - For chupps.com → "marketplace": "Shopify"
 
-User Query: "{query}"
+                    User Query: "{query}"
 
-REQUIRED JSON OUTPUT FORMAT:
-{{
-  "summarized_query": "4-5 word summary",
-    "query_type": "metric_analysis|custom_metric_generation|schema_discovery|standard|comparison",
-  "steps": [
-    {{
-      "id": "step1",
-      "tool": "get_all_orders",
-      "params": {{
-        "start_date": "2026-03-05 00:00:00",
-        "end_date": "2026-03-10 23:59:59"
-      }},
-      "depends_on": [],
-      "save_as": "orders_raw"
-    }},
-    {{
-      "id": "step2", 
-      "tool": "convert_to_df",
-      "params": {{
-        "raw": "{{{{orders_raw}}}}"
-      }},
-      "depends_on": ["step1"],
-      "save_as": "orders_df"
-    }},
-    {{
-      "id": "step3",
-      "tool": "get_aov",
-      "params": {{
-        "table": "{{{{orders_df}}}}"
-      }},
-      "depends_on": ["step2"],
-      "save_as": "aov_result"
-    }}
-  ],
-  "manipulation": {{
-    "required": true|false,
-    "type": "filter"|null
-  }},
-  "base_params": {{
-    "start_date": "actual date",
-    "end_date": "actual date"
-  }},
-  "tool": "get_all_orders"
-}}
+                    REQUIRED JSON OUTPUT FORMAT:
+                    {{
+                    "summarized_query": "4-5 word summary",
+                        "query_type": "metric_analysis|custom_metric_generation|schema_discovery|standard|comparison",
+                    "steps": [
+                        {{
+                        "id": "step1",
+                        "tool": "get_all_orders",
+                        "params": {{
+                            "start_date": "2026-03-05 00:00:00",
+                            "end_date": "2026-03-10 23:59:59"
+                        }},
+                        "depends_on": [],
+                        "save_as": "orders_raw"
+                        }},
+                        {{
+                        "id": "step2", 
+                        "tool": "convert_to_df",
+                        "params": {{
+                            "raw": "{{{{orders_raw}}}}"
+                        }},
+                        "depends_on": ["step1"],
+                        "save_as": "orders_df"
+                        }},
+                        {{
+                        "id": "step3",
+                        "tool": "get_aov",
+                        "params": {{
+                            "table": "{{{{orders_df}}}}"
+                        }},
+                        "depends_on": ["step2"],
+                        "save_as": "aov_result"
+                        }}
+                    ],
+                    "manipulation": {{
+                        "required": true|false,
+                        "type": "filter"|null
+                    }},
+                    "base_params": {{
+                        "start_date": "actual date",
+                        "end_date": "actual date"
+                    }},
+                    "tool": "get_all_orders"
+                    }}
 
-OPTIMIZATION STRATEGIES:
-1. **COMPREHENSIVE ANALYSIS**: Include related metrics (COD→get_cod_vs_prepaid_metrics, Revenue→get_aov+get_order_count+get_total_revenue)
-2. **EARLY FILTERING**: Use apply_filters before convert_to_df for large datasets  
-3. **CUSTOM METRICS**: Use execute_custom_calculation for complex business logic not available in standard tools
+                    OPTIMIZATION STRATEGIES:
+                    1. **COMPREHENSIVE ANALYSIS**: Include related metrics (COD→get_cod_vs_prepaid_metrics, Revenue→get_aov+get_order_count+get_total_revenue)
+                    2. **EARLY FILTERING**: Use apply_filters before convert_to_df for large datasets  
+                    3. **CUSTOM METRICS**: Use execute_custom_calculation for complex business logic not available in standard tools
 
-Query Types:
-- "schema_discovery": Data structure/field questions
-- "comparison": Comparing groups (marketplaces, payment modes, etc.)  
-- "metric_analysis": Specific metrics (AOV, revenue, distributions)
-- "custom_metric_generation": Custom formula or derived metric requests that require execute_custom_calculation
-- "standard": Regular data fetch with optional filtering
+                    Query Types:
+                    - "schema_discovery": Data structure/field questions
+                    - "comparison": Comparing groups (marketplaces, payment modes, etc.)  
+                    - "metric_analysis": Specific metrics (AOV, revenue, distributions)
+                    - "custom_metric_generation": Custom formula or derived metric requests that require execute_custom_calculation
+                    - "standard": Regular data fetch with optional filtering
 
-IMPORTANT RULES: 
-1. You MUST respond with a JSON object, NOT function calls. The available functions are for reference only. 
-2. Every response MUST include "summarized_query" field with 4-5 word summary.
-3. Use convert_to_df only when calculation / manipulation involved. If simple fetching of orders asked, then no need.
-4. For execute_custom_calculation, calculation_code must assign output to variable named 'result'.
-5. Prefer metric_analysis for built-in metric tools; use custom_metric_generation only when built-in tools cannot satisfy the query.
+                    IMPORTANT RULES: 
+                    1. You MUST respond with a JSON object, NOT function calls. The available functions are for reference only. 
+                    2. Every response MUST include "summarized_query" field with 4-5 word summary.
+                    3. Use convert_to_df only when calculation / manipulation involved. If simple fetching of orders asked, then no need.
+                    4. For execute_custom_calculation, calculation_code must assign output to variable named 'result'.
+                    5. Prefer metric_analysis for built-in metric tools; use custom_metric_generation only when built-in tools cannot satisfy the query.
 
-FEW-SHOT EXAMPLES:
-These show exactly how to chain tools for different query types. Copy the structure exactly.
+                    FEW-SHOT EXAMPLES:
+                    These show exactly how to chain tools for different query types. Copy the structure exactly.
 
-Query: "What is the AOV for last 5 days?"
-{{
-    "summarized_query": "AOV last 5 days",
-    "query_type": "metric_analysis",
-    "steps": [
-        {{"id": "step1", "tool": "get_all_orders", "params": {{"start_date": "2026-03-11 00:00:00", "end_date": "2026-03-15 23:59:59"}}, "depends_on": [], "save_as": "orders_raw"}},
-        {{"id": "step2", "tool": "convert_to_df", "params": {{"raw": "{{{{orders_raw}}}}"}}, "depends_on": ["step1"], "save_as": "orders_df"}},
-        {{"id": "step3", "tool": "get_aov", "params": {{"table": "{{{{orders_df}}}}"}}, "depends_on": ["step2"], "save_as": "aov_result"}}
-    ],
-    "manipulation": {{"required": false, "type": null}},
-    "base_params": {{"start_date": "2026-03-11 00:00:00", "end_date": "2026-03-15 23:59:59"}},
-    "tool": "get_all_orders"
-}}
+                    Query: "What is the AOV for last 5 days?"
+                    {{
+                        "summarized_query": "AOV last 5 days",
+                        "query_type": "metric_analysis",
+                        "steps": [
+                            {{"id": "step1", "tool": "get_all_orders", "params": {{"start_date": "2026-03-11 00:00:00", "end_date": "2026-03-15 23:59:59"}}, "depends_on": [], "save_as": "orders_raw"}},
+                            {{"id": "step2", "tool": "convert_to_df", "params": {{"raw": "{{{{orders_raw}}}}"}}, "depends_on": ["step1"], "save_as": "orders_df"}},
+                            {{"id": "step3", "tool": "get_aov", "params": {{"table": "{{{{orders_df}}}}"}}, "depends_on": ["step2"], "save_as": "aov_result"}}
+                        ],
+                        "manipulation": {{"required": false, "type": null}},
+                        "base_params": {{"start_date": "2026-03-11 00:00:00", "end_date": "2026-03-15 23:59:59"}},
+                        "tool": "get_all_orders"
+                    }}
 
-Query: "Show only COD orders from Shopify yesterday and calculate their AOV"
-{{
-    "summarized_query": "COD Shopify AOV yesterday",
-    "query_type": "metric_analysis",
-    "steps": [
-        {{"id": "step1", "tool": "get_all_orders", "params": {{"start_date": "2026-03-15 00:00:00", "end_date": "2026-03-15 23:59:59"}}, "depends_on": [], "save_as": "orders_raw"}},
-        {{"id": "step2", "tool": "apply_filters", "params": {{"table": "{{{{orders_raw}}}}", "filters": [{{"field": "marketplace", "value": "Shopify"}}, {{"field": "payment_mode", "value": "COD"}}]}}, "depends_on": ["step1"], "save_as": "filtered_raw"}},
-        {{"id": "step3", "tool": "convert_to_df", "params": {{"raw": "{{{{filtered_raw}}}}"}}, "depends_on": ["step2"], "save_as": "orders_df"}},
-        {{"id": "step4", "tool": "get_aov", "params": {{"table": "{{{{orders_df}}}}"}}, "depends_on": ["step3"], "save_as": "aov_result"}}
-    ],
-    "manipulation": {{"required": true, "type": "filter"}},
-    "base_params": {{"start_date": "2026-03-15 00:00:00", "end_date": "2026-03-15 23:59:59"}},
-    "tool": "get_all_orders"
-}}
+                    Query: "Show only COD orders from Shopify yesterday and calculate their AOV"
+                    {{
+                        "summarized_query": "COD Shopify AOV yesterday",
+                        "query_type": "metric_analysis",
+                        "steps": [
+                            {{"id": "step1", "tool": "get_all_orders", "params": {{"start_date": "2026-03-15 00:00:00", "end_date": "2026-03-15 23:59:59"}}, "depends_on": [], "save_as": "orders_raw"}},
+                            {{"id": "step2", "tool": "apply_filters", "params": {{"table": "{{{{orders_raw}}}}", "filters": [{{"field": "marketplace", "value": "Shopify"}}, {{"field": "payment_mode", "value": "COD"}}]}}, "depends_on": ["step1"], "save_as": "filtered_raw"}},
+                            {{"id": "step3", "tool": "convert_to_df", "params": {{"raw": "{{{{filtered_raw}}}}"}}, "depends_on": ["step2"], "save_as": "orders_df"}},
+                            {{"id": "step4", "tool": "get_aov", "params": {{"table": "{{{{orders_df}}}}"}}, "depends_on": ["step3"], "save_as": "aov_result"}}
+                        ],
+                        "manipulation": {{"required": true, "type": "filter"}},
+                        "base_params": {{"start_date": "2026-03-15 00:00:00", "end_date": "2026-03-15 23:59:59"}},
+                        "tool": "get_all_orders"
+                    }}
 
-Query: "Revenue vs last week for prepaid vs COD"
-{{
-    "summarized_query": "Revenue prepaid vs COD comparison",
-    "query_type": "comparison",
-    "steps": [
-        {{"id": "step1", "tool": "get_all_orders", "params": {{"start_date": "2026-03-09 00:00:00", "end_date": "2026-03-15 23:59:59"}}, "depends_on": [], "save_as": "orders_raw"}},
-        {{"id": "step2", "tool": "apply_filters", "params": {{"table": "{{{{orders_raw}}}}", "filters": []}}, "depends_on": ["step1"], "save_as": "filtered_raw"}},
-        {{"id": "step3", "tool": "convert_to_df", "params": {{"raw": "{{{{filtered_raw}}}}"}}, "depends_on": ["step2"], "save_as": "orders_df"}},
-        {{"id": "step4", "tool": "get_cod_vs_prepaid_metrics", "params": {{"table": "{{{{orders_df}}}}"}}, "depends_on": ["step3"], "save_as": "comparison_result"}}
-    ],
-    "manipulation": {{"required": false, "type": null}},
-    "base_params": {{"start_date": "2026-03-09 00:00:00", "end_date": "2026-03-15 23:59:59"}},
-    "tool": "get_all_orders"
-}}
+                    Query: "Revenue vs last week for prepaid vs COD"
+                    {{
+                        "summarized_query": "Revenue prepaid vs COD comparison",
+                        "query_type": "comparison",
+                        "steps": [
+                            {{"id": "step1", "tool": "get_all_orders", "params": {{"start_date": "2026-03-09 00:00:00", "end_date": "2026-03-15 23:59:59"}}, "depends_on": [], "save_as": "orders_raw"}},
+                            {{"id": "step2", "tool": "apply_filters", "params": {{"table": "{{{{orders_raw}}}}", "filters": []}}, "depends_on": ["step1"], "save_as": "filtered_raw"}},
+                            {{"id": "step3", "tool": "convert_to_df", "params": {{"raw": "{{{{filtered_raw}}}}"}}, "depends_on": ["step2"], "save_as": "orders_df"}},
+                            {{"id": "step4", "tool": "get_cod_vs_prepaid_metrics", "params": {{"table": "{{{{orders_df}}}}"}}, "depends_on": ["step3"], "save_as": "comparison_result"}}
+                        ],
+                        "manipulation": {{"required": false, "type": null}},
+                        "base_params": {{"start_date": "2026-03-09 00:00:00", "end_date": "2026-03-15 23:59:59"}},
+                        "tool": "get_all_orders"
+                    }}
 
-Query: "Custom metric: (total revenue - refunds) / order count last 30 days"
-{{
-    "summarized_query": "Net revenue per order last 30 days",
-    "query_type": "custom_metric_generation",
-    "steps": [
-        {{"id": "step1", "tool": "get_all_orders", "params": {{"start_date": "2026-02-14 00:00:00", "end_date": "2026-03-15 23:59:59"}}, "depends_on": [], "save_as": "orders_raw"}},
-        {{"id": "step2", "tool": "convert_to_df", "params": {{"raw": "{{{{orders_raw}}}}"}}, "depends_on": ["step1"], "save_as": "orders_df"}},
-        {{"id": "step3", "tool": "execute_custom_calculation", "params": {{"table": "{{{{orders_df}}}}", "calculation_code": "result = (df['revenue'].sum() - df['refund_amount'].sum()) / df.shape[0]"}}, "depends_on": ["step2"], "save_as": "custom_result"}}
-    ],
-    "manipulation": {{"required": false, "type": null}},
-    "base_params": {{"start_date": "2026-02-14 00:00:00", "end_date": "2026-03-15 23:59:59"}},
-    "tool": "get_all_orders"
-}}
+                    Query: "Custom metric: (total revenue - refunds) / order count last 30 days"
+                    {{
+                        "summarized_query": "Net revenue per order last 30 days",
+                        "query_type": "custom_metric_generation",
+                        "steps": [
+                            {{"id": "step1", "tool": "get_all_orders", "params": {{"start_date": "2026-02-14 00:00:00", "end_date": "2026-03-15 23:59:59"}}, "depends_on": [], "save_as": "orders_raw"}},
+                            {{"id": "step2", "tool": "convert_to_df", "params": {{"raw": "{{{{orders_raw}}}}"}}, "depends_on": ["step1"], "save_as": "orders_df"}},
+                            {{"id": "step3", "tool": "execute_custom_calculation", "params": {{"table": "{{{{orders_df}}}}", "calculation_code": "result = (df['revenue'].sum() - df['refund_amount'].sum()) / df.shape[0]"}}, "depends_on": ["step2"], "save_as": "custom_result"}}
+                        ],
+                        "manipulation": {{"required": false, "type": null}},
+                        "base_params": {{"start_date": "2026-02-14 00:00:00", "end_date": "2026-03-15 23:59:59"}},
+                        "tool": "get_all_orders"
+                    }}
 
-Return ONLY the JSON object with the structure based on query type.
+                    Return ONLY the JSON object with the structure based on query type.
 """
 
         tools = self._get_tool_definitions()
