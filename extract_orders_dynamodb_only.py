@@ -19,10 +19,29 @@ from dotenv import load_dotenv
 DEFAULT_BASE_URL = "https://api.easyecom.io"
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M:%S"
-DEFAULT_DYNAMODB_TABLE = "history-orders-dev"
+DEFAULT_DYNAMODB_TABLE = "history-orders-2503"
 DEFAULT_AWS_REGION = "ap-south-1"
-PRIMARY_KEY_FIELD = "order_id"
+PRIMARY_KEY_FIELD = "invoice_id"
 DEFAULT_DDB_BATCH_SIZE = 25
+REQUIRED_COLUMNS = [
+    "order_id",
+    "order_date",
+    "total_amount",
+    "item_quantity",
+    "suborder_quantity",
+    "order_quantity",
+    "sku",
+    "canonical_sku",
+    "suborder_sku",
+    "suborder_marketplace_sku",
+    "marketplace_sku",
+    "order_status",
+    "payment_mode",
+    "order_type",
+    "state",
+    "size",
+    "suborder_size",
+]
 
 
 # Load environment variables from backend/.env when present.
@@ -130,22 +149,105 @@ def _serialize_item_for_client(item: Dict, serializer: TypeSerializer) -> Dict:
     return {k: serializer.serialize(v) for k, v in normalized_item.items()}
 
 
+def _first_suborder(order: Dict) -> Dict:
+    suborders = order.get("suborders")
+    if isinstance(suborders, list) and suborders and isinstance(suborders[0], dict):
+        return suborders[0]
+    return {}
+
+
+def _pick_first_non_empty(*values):
+    for value in values:
+        if value not in (None, "", [], {}):
+            return value
+    return None
+
+
+def _project_order_for_dynamodb(
+    order: Dict,
+    source_tag: str,
+    source_month: str,
+    primary_key: str,
+) -> Dict:
+    first_sub = _first_suborder(order)
+
+    projected = {
+        primary_key: order.get(primary_key),
+        "source_file": source_tag,
+        "source_month": source_month,
+        "order_id": order.get("order_id"),
+        "order_date": order.get("order_date"),
+        "total_amount": order.get("total_amount"),
+        "item_quantity": _pick_first_non_empty(
+            order.get("item_quantity"),
+            first_sub.get("item_quantity"),
+        ),
+        "suborder_quantity": _pick_first_non_empty(
+            order.get("suborder_quantity"),
+            first_sub.get("suborder_quantity"),
+        ),
+        "order_quantity": order.get("order_quantity"),
+        "sku": _pick_first_non_empty(
+            order.get("sku"),
+            first_sub.get("sku"),
+        ),
+        "suborder_sku": _pick_first_non_empty(
+            order.get("suborder_sku"),
+            first_sub.get("sku"),
+        ),
+        "suborder_marketplace_sku": _pick_first_non_empty(
+            order.get("suborder_marketplace_sku"),
+            first_sub.get("marketplace_sku"),
+        ),
+        "marketplace_sku": _pick_first_non_empty(
+            order.get("marketplace_sku"),
+            first_sub.get("marketplace_sku"),
+        ),
+        "order_status": order.get("order_status"),
+        "payment_mode": order.get("payment_mode"),
+        "order_type": order.get("order_type"),
+        "state": order.get("state"),
+        "size": _pick_first_non_empty(
+            order.get("size"),
+            first_sub.get("size"),
+        ),
+        "suborder_size": _pick_first_non_empty(
+            order.get("suborder_size"),
+            first_sub.get("size"),
+        ),
+    }
+
+    projected["canonical_sku"] = _pick_first_non_empty(
+        order.get("canonical_sku"),
+        projected.get("sku"),
+        projected.get("suborder_sku"),
+        projected.get("suborder_marketplace_sku"),
+        projected.get("marketplace_sku"),
+    )
+
+    allowed = set(REQUIRED_COLUMNS + [primary_key, "source_file", "source_month"])
+    return {k: v for k, v in projected.items() if k in allowed and v is not None}
+
+
 def prepare_rows_for_dynamodb(
     orders: List[Dict],
     source_tag: str,
     source_month: str,
     primary_key: str = PRIMARY_KEY_FIELD,
 ) -> List[Dict]:
-    """Prepare rows and add lineage metadata for DynamoDB upserts."""
+    """Prepare projected rows and add lineage metadata for DynamoDB upserts."""
     prepared_rows: List[Dict] = []
 
     for idx, order in enumerate(orders):
         if not isinstance(order, dict):
             continue
 
-        row = dict(order)
-        row["source_file"] = source_tag
-        row["source_month"] = source_month
+        row = _project_order_for_dynamodb(
+            order=order,
+            source_tag=source_tag,
+            source_month=source_month,
+            primary_key=primary_key,
+        )
 
         if row.get(primary_key) in (None, ""):
             raise ValueError(
@@ -238,13 +340,11 @@ def run_extraction(
             source_month=current_day.strftime("%Y-%m"),
         )
 
-        
-
-        # upserted_count = upsert_orders_into_dynamodb(
-        #     dynamodb_client=dynamodb_client,
-        #     table_name=table_name,
-        #     rows=rows_for_dynamodb,
-        # )
+        upserted_count = upsert_orders_into_dynamodb(
+            dynamodb_client=dynamodb_client,
+            table_name=table_name,
+            rows=rows_for_dynamodb,
+        )
 
         day_count = len(daily_orders)
         total_orders += day_count

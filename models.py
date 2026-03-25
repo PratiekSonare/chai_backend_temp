@@ -27,7 +27,7 @@ class GeographyRequest(BaseModel):
 
 class HistoryOrdersRequest(BaseModel):
     """Request model for historical orders queries from Supabase"""
-    table_name: str = "history-orders-dev"
+    table_name: str = "history-orders-2503"
     start_date: str = Field(default_factory=_default_start_date)
     end_date: str = Field(default_factory=_default_end_date)
     filters: Optional[Dict[str, Any]] = None
