@@ -28,7 +28,7 @@ except Exception as e:
 router = APIRouter()
 
 DYNAMODB_REGION = os.getenv("AWS_REGION", "ap-south-1")
-DYNAMODB_TABLE_NAME = os.getenv("HISTORY_ORDERS_DYNAMODB_TABLE", "history-orders-dev")
+DYNAMODB_TABLE_NAME = os.getenv("HISTORY_ORDERS_DYNAMODB_TABLE", "history-orders-2503")
 
 try:
     dynamodb = boto3.resource("dynamodb", region_name=DYNAMODB_REGION)

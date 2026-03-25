@@ -26,7 +26,7 @@ class GeographyRequest(BaseModel):
     state: str
 
 class HistoryOrdersRequest(BaseModel):
-    """Request model for historical orders queries from Supabase"""
+    """Request model for historical orders queries from DyanmoDB"""
     table_name: str = "history-orders-2503"
     start_date: str = Field(default_factory=_default_start_date)
     end_date: str = Field(default_factory=_default_end_date)
