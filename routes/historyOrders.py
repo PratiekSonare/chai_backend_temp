@@ -7,8 +7,7 @@ from fastapi import APIRouter, HTTPException
 from datetime import datetime, timedelta
 from utils.type_converters import convert_numpy_types
 from models import HistoryOrdersRequest
-from typing import Optional, Dict, Any
-from boto3.dynamodb.conditions import Attr
+from typing import Optional, Dict, Any, Union
 
 # Initialize Supabase client
 try:
@@ -54,6 +53,10 @@ REQUIRED_COLUMNS = [
     'payment_mode',          # For COD/PrePaid analysis
     'order_type',            # For B2B vs B2C analysis
     'state',                 # For geographic analysis
+    'marketplace',           # Client-side filtering
+    'courier',               # Client-side filtering
+    'import_warehouse_name', # Client-side filtering
+    'billing_state',         # Client-side filtering
     'size',                  # For size distribution
     'suborder_size',         # Alternative size column
 ]
@@ -98,44 +101,72 @@ def _decimal_to_native(value: Any) -> Any:
         return [_decimal_to_native(v) for v in value]
     return value
 
-def _build_dynamodb_filter_expression(
+def _apply_client_side_filters(
+    df: pd.DataFrame,
     start_date: Optional[str],
     end_date: Optional[str],
     filters: Optional[Dict[str, Any]],
-):
-    expression = None
+) -> pd.DataFrame:
+    if df.empty:
+        return df
 
-    if start_date:
-        expression = Attr("order_date").gte(start_date)
-    if end_date:
-        end_expr = Attr("order_date").lte(end_date)
-        expression = end_expr if expression is None else expression & end_expr
+    filtered = df.copy()
 
-    excluded_filter_keys = {
-        "granularity",
-        "top_n",
-        "comparison_window",
-        "sku_1",
-        "sku1",
-        "sku_2",
-        "sku2",
+    if 'order_date' in filtered.columns:
+        filtered['order_date'] = pd.to_datetime(filtered['order_date'], errors='coerce')
+
+    if start_date and 'order_date' in filtered.columns:
+        start_ts = pd.to_datetime(start_date, errors='coerce')
+        if pd.notna(start_ts):
+            filtered = filtered[filtered['order_date'] >= start_ts]
+
+    if end_date and 'order_date' in filtered.columns:
+        end_ts = pd.to_datetime(end_date, errors='coerce')
+        if pd.notna(end_ts):
+            filtered = filtered[filtered['order_date'] <= end_ts]
+
+    if not filters:
+        return filtered
+
+    client_filter_fields = {
+        'order_date',
+        'marketplace',
+        'courier',
+        'import_warehouse_name',
+        'billing_state',
     }
 
-    if filters:
-        for column, value in filters.items():
-            if column in excluded_filter_keys or value is None:
-                continue
+    for key in client_filter_fields:
+        if key not in filters:
+            continue
 
+        value = filters.get(key)
+        if value is None or key not in filtered.columns:
+            continue
+
+        if key == 'order_date':
+            date_series = pd.to_datetime(filtered['order_date'], errors='coerce').dt.strftime('%Y-%m-%d')
             if isinstance(value, list):
-                if not value:
-                    continue
-                cond = Attr(column).is_in(value)
+                date_values = [str(v).strip()[:10] for v in value if v is not None and str(v).strip()]
+                if date_values:
+                    filtered = filtered[date_series.isin(date_values)]
             else:
-                cond = Attr(column).eq(value)
+                date_value = str(value).strip()[:10]
+                if date_value:
+                    filtered = filtered[date_series == date_value]
+            continue
 
-            expression = cond if expression is None else expression & cond
+        col_series = filtered[key].astype(str).str.strip().str.lower()
+        if isinstance(value, list):
+            allowed = [str(v).strip().lower() for v in value if v is not None and str(v).strip()]
+            if allowed:
+                filtered = filtered[col_series.isin(allowed)]
+        else:
+            target = str(value).strip().lower()
+            if target:
+                filtered = filtered[col_series == target]
 
-    return expression
+    return filtered
 
 def _build_projection_expression(columns: list[str]) -> tuple[str, Dict[str, str]]:
     """Build ProjectionExpression with aliases for reserved keywords."""
@@ -159,7 +190,12 @@ def _build_projection_expression(columns: list[str]) -> tuple[str, Dict[str, str
 
 
 # ============ DYNAMODB DATA FETCHING ============
-def fetch_historical_orders(request: HistoryOrdersRequest) -> pd.DataFrame:
+def fetch_historical_orders(
+    request_or_table: Union[HistoryOrdersRequest, str],
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    filters: Optional[Dict[str, Any]] = None,
+) -> pd.DataFrame:
     """
     Fetch historical orders from DynamoDB
     
@@ -179,6 +215,17 @@ def fetch_historical_orders(request: HistoryOrdersRequest) -> pd.DataFrame:
         )
     
     try:
+        if isinstance(request_or_table, HistoryOrdersRequest):
+            request = request_or_table
+        else:
+            table_name = str(request_or_table).strip() if request_or_table else DYNAMODB_TABLE_NAME
+            request = HistoryOrdersRequest(
+                table_name=table_name,
+                start_date=start_date,
+                end_date=end_date,
+                filters=filters,
+            )
+
         table_name = request.table_name
         request_start_date = request.start_date
         request_end_date = request.end_date
@@ -191,11 +238,6 @@ def fetch_historical_orders(request: HistoryOrdersRequest) -> pd.DataFrame:
             print("filters: ", request_filters, flush=True)
 
         table = dynamodb.Table(table_name)
-        filter_expression = _build_dynamodb_filter_expression(
-            start_date=request_start_date,
-            end_date=request_end_date,
-            filters=request_filters,
-        )
 
         projection_expression, expression_attribute_names = _build_projection_expression(REQUIRED_COLUMNS)
 
@@ -204,8 +246,6 @@ def fetch_historical_orders(request: HistoryOrdersRequest) -> pd.DataFrame:
         }
         if expression_attribute_names:
             scan_kwargs["ExpressionAttributeNames"] = expression_attribute_names
-        if filter_expression is not None:
-            scan_kwargs["FilterExpression"] = filter_expression
 
         items: list[dict] = []
         response = table.scan(**scan_kwargs)
@@ -232,6 +272,14 @@ def fetch_historical_orders(request: HistoryOrdersRequest) -> pd.DataFrame:
         for col in numeric_columns:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
+        # Apply all required request filters client-side (no DynamoDB FilterExpression).
+        df = _apply_client_side_filters(
+            df=df,
+            start_date=request_start_date,
+            end_date=request_end_date,
+            filters=request_filters,
+        )
         
         return df
         
@@ -1132,76 +1180,18 @@ def kpi_comparison_30d(request: HistoryOrdersRequest):
     - Units sold
     """
     try:
-        if not request.end_date:
-            request.end_date = datetime.now().date().isoformat()
-        
         current_end = datetime.fromisoformat(request.end_date)
-        current_start = current_end - timedelta(days=30)
+        current_start = current_end - timedelta(days=29)
         previous_end = current_start - timedelta(days=1)
-        previous_start = previous_end - timedelta(days=30)
-        
-        # Fetch current 30d data
-        current_df = fetch_historical_orders(
-            request.table_name,
-            current_start.isoformat(),
-            request.end_date,
-            request.filters
+        previous_start = previous_end - timedelta(days=29)
+        return _kpi_comparison_response(
+            request=request,
+            metric_name="30-Day Comparison",
+            current_start=current_start,
+            current_end=current_end,
+            previous_start=previous_start,
+            previous_end=previous_end,
         )
-        
-        # Fetch previous 30d data
-        previous_df = fetch_historical_orders(
-            request.table_name,
-            previous_start.isoformat(),
-            previous_end.isoformat(),
-            request.filters
-        )
-        
-        # Calculate metrics for current period
-        current_orders = current_df['order_id'].nunique() if 'order_id' in current_df.columns else len(current_df)
-        current_revenue = float(current_df['total_amount'].sum()) if 'total_amount' in current_df.columns else 0.0
-        current_units = int(current_df['item_quantity'].sum()) if 'item_quantity' in current_df.columns else 0
-        current_aov = current_revenue / current_orders if current_orders > 0 else 0.0
-        
-        # Calculate metrics for previous period
-        previous_orders = previous_df['order_id'].nunique() if 'order_id' in previous_df.columns else len(previous_df)
-        previous_revenue = float(previous_df['total_amount'].sum()) if 'total_amount' in previous_df.columns else 0.0
-        previous_units = int(previous_df['item_quantity'].sum()) if 'item_quantity' in previous_df.columns else 0
-        previous_aov = previous_revenue / previous_orders if previous_orders > 0 else 0.0
-        
-        # Calculate deltas
-        order_delta = ((current_orders - previous_orders) / previous_orders * 100) if previous_orders > 0 else 0.0
-        revenue_delta = ((current_revenue - previous_revenue) / previous_revenue * 100) if previous_revenue > 0 else 0.0
-        units_delta = ((current_units - previous_units) / previous_units * 100) if previous_units > 0 else 0.0
-        aov_delta = ((current_aov - previous_aov) / previous_aov * 100) if previous_aov > 0 else 0.0
-        
-        return convert_numpy_types({
-            "success": True,
-            "metric_name": "30-Day Comparison",
-            "current_period": {
-                "start_date": current_start.isoformat(),
-                "end_date": request.end_date,
-                "orders": int(current_orders),
-                "revenue": current_revenue,
-                "aov": current_aov,
-                "units": current_units
-            },
-            "previous_period": {
-                "start_date": previous_start.isoformat(),
-                "end_date": previous_end.isoformat(),
-                "orders": int(previous_orders),
-                "revenue": previous_revenue,
-                "aov": previous_aov,
-                "units": previous_units
-            },
-            "deltas": {
-                "orders_pct": round(float(order_delta), 2),
-                "revenue_pct": round(float(revenue_delta), 2),
-                "units_pct": round(float(units_delta), 2),
-                "aov_pct": round(float(aov_delta), 2)
-            },
-            "timestamp": datetime.now().isoformat()
-        })
-        
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -1211,7 +1201,7 @@ def kpi_comparison_30d(request: HistoryOrdersRequest):
 @router.post('/history/kpi/comparison-7d')
 def kpi_comparison_7d(request: HistoryOrdersRequest):
     """
-    KPI Card: 30-Day Comparison
+    KPI Card: 7-Day Comparison
     Compare current 7 days vs previous 7 days for:
     - Orders count
     - Revenue
@@ -1219,81 +1209,140 @@ def kpi_comparison_7d(request: HistoryOrdersRequest):
     - Units sold
     """
     try:
-        if not request.end_date:
-            request.end_date = datetime.now().date().isoformat()
-        
         current_end = datetime.fromisoformat(request.end_date)
-        current_start = current_end - timedelta(days=7)
+        current_start = current_end - timedelta(days=6)
         previous_end = current_start - timedelta(days=1)
-        previous_start = previous_end - timedelta(days=7)
-        
-        # Fetch current 30d data
-        current_df = fetch_historical_orders(
-            request.table_name,
-            current_start.isoformat(),
-            request.end_date,
-            request.filters
+        previous_start = previous_end - timedelta(days=6)
+        return _kpi_comparison_response(
+            request=request,
+            metric_name="7-Day Comparison",
+            current_start=current_start,
+            current_end=current_end,
+            previous_start=previous_start,
+            previous_end=previous_end,
         )
-        
-        # Fetch previous 30d data
-        previous_df = fetch_historical_orders(
-            request.table_name,
-            previous_start.isoformat(),
-            previous_end.isoformat(),
-            request.filters
-        )
-        
-        # Calculate metrics for current period
-        current_orders = current_df['order_id'].nunique() if 'order_id' in current_df.columns else len(current_df)
-        current_revenue = float(current_df['total_amount'].sum()) if 'total_amount' in current_df.columns else 0.0
-        current_units = int(current_df['item_quantity'].sum()) if 'item_quantity' in current_df.columns else 0
-        current_aov = current_revenue / current_orders if current_orders > 0 else 0.0
-        
-        # Calculate metrics for previous period
-        previous_orders = previous_df['order_id'].nunique() if 'order_id' in previous_df.columns else len(previous_df)
-        previous_revenue = float(previous_df['total_amount'].sum()) if 'total_amount' in previous_df.columns else 0.0
-        previous_units = int(previous_df['item_quantity'].sum()) if 'item_quantity' in previous_df.columns else 0
-        previous_aov = previous_revenue / previous_orders if previous_orders > 0 else 0.0
-        
-        # Calculate deltas
-        order_delta = ((current_orders - previous_orders) / previous_orders * 100) if previous_orders > 0 else 0.0
-        revenue_delta = ((current_revenue - previous_revenue) / previous_revenue * 100) if previous_revenue > 0 else 0.0
-        units_delta = ((current_units - previous_units) / previous_units * 100) if previous_units > 0 else 0.0
-        aov_delta = ((current_aov - previous_aov) / previous_aov * 100) if previous_aov > 0 else 0.0
-        
-        return convert_numpy_types({
-            "success": True,
-            "metric_name": "7-Day Comparison",
-            "current_period": {
-                "start_date": current_start.isoformat(),
-                "end_date": request.end_date,
-                "orders": int(current_orders),
-                "revenue": current_revenue,
-                "aov": current_aov,
-                "units": current_units
-            },
-            "previous_period": {
-                "start_date": previous_start.isoformat(),
-                "end_date": previous_end.isoformat(),
-                "orders": int(previous_orders),
-                "revenue": previous_revenue,
-                "aov": previous_aov,
-                "units": previous_units
-            },
-            "deltas": {
-                "orders_pct": round(float(order_delta), 2),
-                "revenue_pct": round(float(revenue_delta), 2),
-                "units_pct": round(float(units_delta), 2),
-                "aov_pct": round(float(aov_delta), 2)
-            },
-            "timestamp": datetime.now().isoformat()
-        })
-        
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail=f"Error calculating 7-day comparison: {str(e)}"
         )
+
+
+@router.post('/history/kpi/comparison-quarter')
+def kpi_comparison_quarter(request: HistoryOrdersRequest):
+    """
+    KPI Card: Quarter Comparison
+    Compare current quarter-to-date vs previous quarter.
+    """
+    try:
+        current_end = datetime.fromisoformat(request.end_date)
+
+        current_quarter_start_month = ((current_end.month - 1) // 3) * 3 + 1
+        current_start = current_end.replace(
+            month=current_quarter_start_month,
+            day=1,
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+
+        previous_end = current_start - timedelta(days=1)
+        previous_quarter_start_month = ((previous_end.month - 1) // 3) * 3 + 1
+        previous_start = previous_end.replace(
+            month=previous_quarter_start_month,
+            day=1,
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+
+        return _kpi_comparison_response(
+            request=request,
+            metric_name="Quarter Comparison",
+            current_start=current_start,
+            current_end=current_end,
+            previous_start=previous_start,
+            previous_end=previous_end,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error calculating quarter comparison: {str(e)}"
+        )
+
+
+def _comparison_units(df: pd.DataFrame) -> int:
+    if df.empty:
+        return 0
+    if 'item_quantity' in df.columns:
+        return int(df['item_quantity'].sum())
+    if 'suborder_quantity' in df.columns:
+        return int(df['suborder_quantity'].sum())
+    if 'order_quantity' in df.columns:
+        return int(df['order_quantity'].sum())
+    return int(len(df))
+
+
+def _comparison_metrics(df: pd.DataFrame) -> Dict[str, float | int]:
+    orders = _order_count(df)
+    revenue = float(df['total_amount'].sum()) if 'total_amount' in df.columns else 0.0
+    units = _comparison_units(df)
+    aov = float(revenue / orders) if orders > 0 else 0.0
+    return {
+        "orders": int(orders),
+        "revenue": revenue,
+        "aov": aov,
+        "units": int(units),
+    }
+
+
+def _kpi_comparison_response(
+    request: HistoryOrdersRequest,
+    metric_name: str,
+    current_start: datetime,
+    current_end: datetime,
+    previous_start: datetime,
+    previous_end: datetime,
+):
+    current_df = fetch_historical_orders(
+        request.table_name,
+        current_start.date().isoformat(),
+        current_end.date().isoformat(),
+        request.filters,
+    )
+    previous_df = fetch_historical_orders(
+        request.table_name,
+        previous_start.date().isoformat(),
+        previous_end.date().isoformat(),
+        request.filters,
+    )
+
+    current_metrics = _comparison_metrics(current_df)
+    previous_metrics = _comparison_metrics(previous_df)
+
+    return convert_numpy_types({
+        "success": True,
+        "metric_name": metric_name,
+        "current_period": {
+            "start_date": current_start.date().isoformat(),
+            "end_date": current_end.date().isoformat(),
+            **current_metrics,
+        },
+        "previous_period": {
+            "start_date": previous_start.date().isoformat(),
+            "end_date": previous_end.date().isoformat(),
+            **previous_metrics,
+        },
+        "deltas": {
+            "orders_pct": round(_growth_pct(float(current_metrics['orders']), float(previous_metrics['orders'])), 2),
+            "revenue_pct": round(_growth_pct(float(current_metrics['revenue']), float(previous_metrics['revenue'])), 2),
+            "units_pct": round(_growth_pct(float(current_metrics['units']), float(previous_metrics['units'])), 2),
+            "aov_pct": round(_growth_pct(float(current_metrics['aov']), float(previous_metrics['aov'])), 2),
+        },
+        "timestamp": datetime.now().isoformat(),
+    })
 
 
 def _resolve_current_previous_windows(request: HistoryOrdersRequest, default_days: int = 30):

@@ -25,7 +25,7 @@ DEFAULT_PREFIX = "orders"
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M:%S"
 DEFAULT_AWS_REGION = "ap-south-1"
-DEFAULT_DYNAMODB_TABLE = "history-orders-latest"
+DEFAULT_DYNAMODB_TABLE = "history-orders"
 PRIMARY_KEY_FIELD = "invoice_id"
 DEFAULT_DDB_BATCH_SIZE = 25
 REQUIRED_COLUMNS = [
@@ -43,6 +43,10 @@ REQUIRED_COLUMNS = [
     "order_status",
     "payment_mode",
     "order_type",
+    'marketplace',           
+    'courier',               
+    'import_warehouse_name', 
+    'billing_state',         
     "state",
     "size",
     "suborder_size",

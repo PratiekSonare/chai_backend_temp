@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 DEFAULT_BASE_URL = "https://api.easyecom.io"
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M:%S"
-DEFAULT_DYNAMODB_TABLE = "history-orders-2503"
+DEFAULT_DYNAMODB_TABLE = "history-orders"
 DEFAULT_AWS_REGION = "ap-south-1"
 PRIMARY_KEY_FIELD = "invoice_id"
 DEFAULT_DDB_BATCH_SIZE = 25
@@ -38,6 +38,10 @@ REQUIRED_COLUMNS = [
     "order_status",
     "payment_mode",
     "order_type",
+    'marketplace',           
+    'courier',               
+    'import_warehouse_name', 
+    'billing_state',         
     "state",
     "size",
     "suborder_size",
