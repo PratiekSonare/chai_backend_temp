@@ -9,3 +9,4 @@ redis
 pandas
 boto3
 supabase
+google-genai
