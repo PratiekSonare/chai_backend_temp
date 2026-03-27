@@ -16,6 +16,7 @@ def get_examples():
     return {
         "endpoints": {
             "/plan": "POST - Generate execution plan without running the query",
+            "/execute": "POST - Execute a pre-generated plan (skip planning LLM)",
             "/query": "POST - Execute the full query workflow and return results"
         },
         "schema_discovery_queries": [

@@ -4,10 +4,11 @@ import operator
 import pandas as pd
 import json
 import asyncio
+import uuid
 
 # Import tools and LLM providers
 from tools import TOOL_REGISTRY, apply_filters
-from llm_providers import planning_llm, filtering_llm, grouping_llm, insight_llm
+from llm_providers import planning_llm, filtering_llm, grouping_llm, insight_llm, custom_calculation_llm
 
 # State schema
 class AgentState(TypedDict):
@@ -109,8 +110,9 @@ async def _cancelled_state(state: AgentState, step_key: str, summary: str) -> Ag
 
 def cache_result(data: dict | list, key: str) -> str:
     """Cache result and return reference key"""
-    RESULT_CACHE[key] = data
-    return key
+    cache_key = f"{key}_{uuid.uuid4().hex[:8]}"
+    RESULT_CACHE[cache_key] = data
+    return cache_key
 
 def get_cached_result(key: str) -> dict | list:
     """Retrieve result from cache"""
@@ -639,6 +641,114 @@ def metric_processing_node(state: AgentState) -> AgentState:
         print(f"❌ [METRIC_PROCESSING] Error: {str(e)}", flush=True)
         return {**state, "error": f"Metric processing error: {str(e)}"}
 
+
+async def custom_calculation_node(state: AgentState) -> AgentState:
+    """Execute custom metric calculation using ReAct pattern with CustomCalculationLLM"""
+    if _is_request_cancelled(state):
+        return await _cancelled_state(state, "CUSTOM_CALC_CANCELLED", "Custom calculation skipped due to cancellation")
+
+    print(f"🧠 [CUSTOM_CALCULATION] Executing custom metric generation with ReAct pattern", flush=True)
+    
+    try:
+        await emit_step_event(
+            state,
+            "CUSTOM_CALC_START",
+            "Initiating custom metric calculation...",
+            status="START",
+        )
+        
+        plan = state["plan"]
+
+        # Always source DataFrame input from the latest convert_to_df output.
+        # final_result_ref can point to metric caches by this stage.
+        df_step = None
+        for step in reversed(plan.get("steps", [])):
+            if step.get("tool") == "convert_to_df":
+                df_step = step
+                break
+
+        if not df_step:
+            return {**state, "error": "No convert_to_df step found for custom calculation"}
+
+        df_ref = state["tool_result_refs"].get(df_step["save_as"])
+        if not df_ref:
+            return {**state, "error": "No DataFrame reference available for custom calculation"}
+
+        result_data = get_cached_result(df_ref)
+        if not isinstance(result_data, pd.DataFrame):
+            return {**state, "error": "Custom calculation requires a DataFrame input"}
+
+        # Get schema info aligned with the DataFrame source step
+        schema_info = state.get("tool_result_schemas", {}).get(df_step["save_as"], {})
+        
+        # Extract intent from the plan (summarized_query or explicit intent)
+        intent = plan.get("summarized_query", state["summarized_query"] or "Calculate custom metric")
+        
+        # Bind the current DataFrame to the calculator executor expected by ReAct loop.
+        def _bound_custom_executor(calculation_code: str, metric_name: str = "custom_metric") -> dict:
+            return TOOL_REGISTRY["execute_custom_calculation"](
+                table=result_data,
+                calculation_code=calculation_code,
+                metric_name=metric_name,
+            )
+
+        # Invoke CustomCalculationLLM with ReAct pattern
+        calc_result = custom_calculation_llm.invoke({
+            "query": state["user_query"],
+            "intent": intent,
+            "data": result_data,
+            "schema": schema_info,
+            "date_range": plan.get("base_params", {}),
+            "executor": _bound_custom_executor,
+        })
+        
+        if not calc_result.get("success"):
+            error_msg = calc_result.get("error", "Custom calculation failed")
+            print(f"❌ [CUSTOM_CALCULATION] {error_msg}", flush=True)
+            return {
+                **state,
+                "error": f"Custom calculation error: {error_msg}",
+                "metric_results": calc_result.get("last_observation")
+            }
+        
+        # Extract result and metadata
+        final_result = calc_result.get("final_result")
+        metric_results = {
+            "custom_metric": final_result,
+            "calculation_code": calc_result.get("calculation_code"),
+            "iterations": calc_result.get("iterations"),
+            "metadata": calc_result.get("metadata", {})
+        }
+        
+        # Cache the results
+        metric_ref = cache_result(metric_results, key="custom_metric_results")
+        normalized_metrics = {"overall": metric_results}
+        
+        print(f"✅ [CUSTOM_CALCULATION] Custom metric generated successfully in {calc_result.get('iterations', 1)} iteration(s)", flush=True)
+        
+        await emit_step_event(
+            state,
+            "CUSTOM_CALC_COMPLETE",
+            f"Custom metric calculated: {final_result}",
+            status="SUCCESS",
+        )
+        
+        return {
+            **state,
+            "metric_results": metric_results,
+            "aggregated_metrics": normalized_metrics,
+            "metrics_calculated": ["custom_metric"],
+            "final_result_ref": metric_ref,
+            "error": None
+        }
+        
+    except Exception as e:
+        print(f"❌ [CUSTOM_CALCULATION] Error: {str(e)}", flush=True)
+        import traceback
+        traceback.print_exc()
+        return {**state, "error": f"Custom calculation error: {str(e)}"}
+
+
 async def grouping_node(state: AgentState) -> AgentState:
     """Identify comparison groups and create parallel execution branches"""
     if _is_request_cancelled(state):
@@ -1126,12 +1236,29 @@ def needs_manipulation(state: AgentState) -> Literal["filtering", "no_filter", "
 
 def check_error(state: AgentState) -> Literal["replan", "end"]:
     """Decide whether to replan or abort"""
+    if not state.get("error"):
+        return "end"
+
     # If planning failed or too many retries, abort
-    if "Planning" in state["error"] or state["retry_count"] >= 2:
+    if "Planning" in state["error"] or "Invalid precomputed plan" in state["error"] or state["retry_count"] >= 2:
         return "end"
     
     # Otherwise, attempt to replan
     return "replan"
+
+def route_metric_processing(state: AgentState) -> Literal["custom_calculation", "insight_generation", "error"]:
+    """Route after metric processing to custom calculation or insight generation"""
+    if state.get("error"):
+        return "error"
+    
+    query_type = state["plan"].get("query_type", "standard")
+    
+    # Custom metric generation goes to custom calculation node
+    if query_type == "custom_metric_generation":
+        return "custom_calculation"
+    
+    # All other metric types go to insight generation
+    return "insight_generation"
 
 def is_comparison_query(state: AgentState) -> Literal["grouping", "execute_tool", "error"]:
     """Check if query requires comparison or is schema discovery"""
@@ -1163,10 +1290,41 @@ def all_groups_fetched(state: AgentState) -> Literal["parallel_fetch", "aggregat
     
     return "aggregation"
 
+
+def prepare_start_node(state: AgentState) -> AgentState:
+    """Validate precomputed plan before routing into the graph."""
+    plan = state.get("plan")
+    if not plan:
+        return state
+
+    if not isinstance(plan, dict) or not isinstance(plan.get("steps"), list):
+        return {
+            **state,
+            "error": "Invalid precomputed plan: expected object with steps list"
+        }
+
+    return state
+
+
+def route_start(state: AgentState) -> Literal["planning", "grouping", "execute_tool", "error"]:
+    """Route into workflow based on whether a precomputed plan is present."""
+    if state.get("error"):
+        return "error"
+
+    plan = state.get("plan")
+    if not plan:
+        return "planning"
+
+    if plan.get("query_type") == "comparison":
+        return "grouping"
+
+    return "execute_tool"
+
 # Build the graph
 workflow = StateGraph(AgentState)
 
 # Add nodes - Standard flow
+workflow.add_node("route_start", prepare_start_node)
 workflow.add_node("planning", planning_node)
 workflow.add_node("execute_tool", execute_tool_node)
 workflow.add_node("filtering", filtering_node)
@@ -1175,6 +1333,7 @@ workflow.add_node("no_filter", no_filter_node)
 
 # Add nodes - Metric analysis flow
 workflow.add_node("metric_processing", metric_processing_node)
+workflow.add_node("custom_calculation", custom_calculation_node)
 
 # Add nodes - Comparison flow
 workflow.add_node("grouping", grouping_node)
@@ -1184,7 +1343,19 @@ workflow.add_node("comparison", comparison_node)
 workflow.add_node("insight_generation", insight_generation_node)
 
 # Set entry point
-workflow.set_entry_point("planning")
+workflow.set_entry_point("route_start")
+
+# Start routing - skip planning when plan is already present
+workflow.add_conditional_edges(
+    "route_start",
+    route_start,
+    {
+        "planning": "planning",
+        "grouping": "grouping",
+        "execute_tool": "execute_tool",
+        "error": "error_handler",
+    }
+)
 
 # Add edges - Planning branches to comparison or standard flow
 workflow.add_conditional_edges(
@@ -1225,8 +1396,19 @@ workflow.add_edge("filtering", "apply_filters")
 workflow.add_edge("apply_filters", END)
 workflow.add_edge("no_filter", END)
 
-# Metric analysis flow
-workflow.add_edge("metric_processing", "insight_generation")
+# Metric analysis flow - route metric processing to custom calculation or insight generation
+workflow.add_conditional_edges(
+    "metric_processing",
+    route_metric_processing,
+    {
+        "custom_calculation": "custom_calculation",
+        "insight_generation": "insight_generation",
+        "error": "error_handler"
+    }
+)
+
+# Custom calculation routes to insight generation
+workflow.add_edge("custom_calculation", "insight_generation")
 
 # Comparison flow
 workflow.add_edge("grouping", "parallel_fetch")
@@ -1346,8 +1528,6 @@ if __name__ == '__main__':
         data = final_data['data']
         if isinstance(data, list):
             print(f"Found {len(data)} records")
-        else:
-            print(f"Result: {data}")
     else:
         print(f"Error: {result_standard['error']}")
 

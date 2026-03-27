@@ -1,0 +1,263 @@
+{
+  "success": true,
+  "query_type": "custom_metric_generation",
+  "request_id": "9482d38a",
+  "logs": [
+    {
+      "request_id": "9482d38a",
+      "sequence": 1,
+      "step_key": "REQUEST_START",
+      "summary": "Query request accepted",
+      "details": "What is the maximum discount that we're giving on a product and which one, check from 24 march to 26 march only?",
+      "status": "START",
+      "wait_ms": null,
+      "timestamp": "2026-03-27T06:13:59.521919+00:00"
+    },
+    {
+      "request_id": "9482d38a",
+      "sequence": 2,
+      "step_key": "PLANNING_START",
+      "summary": "Planning execution...",
+      "details": "Query: What is the maximum discount that we're giving on a product and which one, check from 24 march to 26 march only?",
+      "status": "START",
+      "wait_ms": null,
+      "timestamp": "2026-03-27T06:13:59.525825+00:00"
+    },
+    {
+      "request_id": "9482d38a",
+      "sequence": 3,
+      "step_key": "NEXT_STEP_PENDING",
+      "summary": "Generating a plan...",
+      "details": null,
+      "status": "PENDING",
+      "wait_ms": 500,
+      "timestamp": "2026-03-27T06:13:59.525942+00:00"
+    },
+    {
+      "request_id": "9482d38a",
+      "sequence": 4,
+      "step_key": "PLANNING_COMPLETE",
+      "summary": "Plan created: custom_metric_generation query",
+      "details": null,
+      "status": "COMPLETE",
+      "wait_ms": null,
+      "timestamp": "2026-03-27T06:14:06.928648+00:00"
+    },
+    {
+      "request_id": "9482d38a",
+      "sequence": 5,
+      "step_key": "EXECUTE_STEP_START",
+      "summary": "Step 1/3",
+      "details": "Retry: 0",
+      "status": "START",
+      "wait_ms": null,
+      "timestamp": "2026-03-27T06:14:06.931296+00:00"
+    },
+    {
+      "request_id": "9482d38a",
+      "sequence": 6,
+      "step_key": "NEXT_STEP_PENDING",
+      "summary": "Executing get_all_orders...",
+      "details": null,
+      "status": "PENDING",
+      "wait_ms": 500,
+      "timestamp": "2026-03-27T06:14:06.931591+00:00"
+    },
+    {
+      "request_id": "9482d38a",
+      "sequence": 8,
+      "step_key": "TOOL_EXECUTION_COMPLETE",
+      "summary": "Executed get_all_orders",
+      "details": "Records: 1190",
+      "status": "COMPLETE",
+      "wait_ms": null,
+      "timestamp": "2026-03-27T06:14:08.598751+00:00"
+    },
+    {
+      "request_id": "9482d38a",
+      "sequence": 9,
+      "step_key": "EXECUTE_STEP_START",
+      "summary": "Step 2/3",
+      "details": "Retry: 0",
+      "status": "START",
+      "wait_ms": null,
+      "timestamp": "2026-03-27T06:14:08.658799+00:00"
+    },
+    {
+      "request_id": "9482d38a",
+      "sequence": 10,
+      "step_key": "NEXT_STEP_PENDING",
+      "summary": "Executing convert_to_df...",
+      "details": null,
+      "status": "PENDING",
+      "wait_ms": 500,
+      "timestamp": "2026-03-27T06:14:08.658927+00:00"
+    },
+    {
+      "request_id": "9482d38a",
+      "sequence": 12,
+      "step_key": "TOOL_EXECUTION_COMPLETE",
+      "summary": "Executed convert_to_df",
+      "details": "Result type: DataFrame",
+      "status": "COMPLETE",
+      "wait_ms": null,
+      "timestamp": "2026-03-27T06:14:09.380505+00:00"
+    },
+    {
+      "request_id": "9482d38a",
+      "sequence": 13,
+      "step_key": "EXECUTE_STEP_START",
+      "summary": "Step 3/3",
+      "details": "Retry: 0",
+      "status": "START",
+      "wait_ms": null,
+      "timestamp": "2026-03-27T06:14:09.492379+00:00"
+    },
+    {
+      "request_id": "9482d38a",
+      "sequence": 14,
+      "step_key": "NEXT_STEP_PENDING",
+      "summary": "Executing execute_custom_calculation...",
+      "details": null,
+      "status": "PENDING",
+      "wait_ms": 500,
+      "timestamp": "2026-03-27T06:14:09.492527+00:00"
+    },
+    {
+      "request_id": "9482d38a",
+      "sequence": 16,
+      "step_key": "TOOL_EXECUTION_COMPLETE",
+      "summary": "Executed execute_custom_calculation",
+      "details": "Result type: dict",
+      "status": "COMPLETE",
+      "wait_ms": null,
+      "timestamp": "2026-03-27T06:14:10.032397+00:00"
+    },
+    {
+      "request_id": "9482d38a",
+      "sequence": 17,
+      "step_key": "CUSTOM_CALC_START",
+      "summary": "Initiating custom metric calculation...",
+      "details": null,
+      "status": "START",
+      "wait_ms": null,
+      "timestamp": "2026-03-27T06:14:10.036880+00:00"
+    },
+    {
+      "request_id": "9482d38a",
+      "sequence": 18,
+      "step_key": "CUSTOM_CALC_COMPLETE",
+      "summary": "Custom metric calculated: None",
+      "details": null,
+      "status": "SUCCESS",
+      "wait_ms": null,
+      "timestamp": "2026-03-27T06:14:27.662189+00:00"
+    },
+    {
+      "request_id": "9482d38a",
+      "sequence": 19,
+      "step_key": "INSIGHT_START",
+      "summary": "Generating insights...",
+      "details": null,
+      "status": "START",
+      "wait_ms": null,
+      "timestamp": "2026-03-27T06:14:27.664426+00:00"
+    },
+    {
+      "request_id": "9482d38a",
+      "sequence": 20,
+      "step_key": "NEXT_STEP_PENDING",
+      "summary": "Generating intelligent insights...",
+      "details": null,
+      "status": "PENDING",
+      "wait_ms": 500,
+      "timestamp": "2026-03-27T06:14:27.664710+00:00"
+    },
+    {
+      "request_id": "9482d38a",
+      "sequence": 21,
+      "step_key": "INSIGHT_COMPLETE",
+      "summary": "Insights generated",
+      "details": "Chars: 692",
+      "status": "COMPLETE",
+      "wait_ms": null,
+      "timestamp": "2026-03-27T06:14:31.040841+00:00"
+    },
+    {
+      "request_id": "9482d38a",
+      "sequence": 22,
+      "step_key": "WORKFLOW_COMPLETE",
+      "summary": "Workflow execution finished",
+      "details": null,
+      "status": "COMPLETE",
+      "wait_ms": null,
+      "timestamp": "2026-03-27T06:14:31.041918+00:00"
+    }
+  ],
+  "summarized_query": "Max product discount 24-26 March",
+  "query": "What is the maximum discount that we're giving on a product and which one, check from 24 march to 26 march only?",
+  "metrics": {
+    "custom_metric": null,
+    "calculation_code": "import pandas as pd\nimport numpy as np\n\n# Define the start and end of the time range\nstart_date = pd.to_datetime('2026-03-24 00:00:00')\nend_date = pd.to_datetime('2026-03-26 23:59:59')\n\n# Initialize result to None, will be updated if calculations are successful\nresult = None\n\n# 1. Data Validation\nrequired_columns = ['timestamp', 'original_price', 'sale_price', 'product_id']\nif not all(col in df.columns for col in required_columns):\n    missing_cols = [col for col in required_columns if col not in df.columns]\n    result = {\n        \"metric_name\": \"Max Product Discount (24-26 March)\",\n        \"time_range_start\": start_date.strftime('%Y-%m-%d %H:%M:%S'),\n        \"time_range_end\": end_date.strftime('%Y-%m-%d %H:%M:%S'),\n        \"max_discount_amount\": None,\n        \"products_with_max_discount\": [],\n        \"message\": f\"Error: Missing required columns: {', '.join(missing_cols)}\"\n    }\nelif df.empty:\n    result = {\n        \"metric_name\": \"Max Product Discount (24-26 March)\",\n        \"time_range_start\": start_date.strftime('%Y-%m-%d %H:%M:%S'),\n        \"time_range_end\": end_date.strftime('%Y-%m-%d %H:%M:%S'),\n        \"max_discount_amount\": None,\n        \"products_with_max_discount\": [],\n        \"message\": \"Input DataFrame is empty.\"\n    }\nelse:\n    # Ensure timestamp is datetime and price columns are numeric\n    try:\n        df['timestamp'] = pd.to_datetime(df['timestamp'])\n        df['original_price'] = pd.to_numeric(df['original_price'], errors='coerce')\n        df['sale_price'] = pd.to_numeric(df['sale_price'], errors='coerce')\n    except Exception as e:\n        result = {\n            \"metric_name\": \"Max Product Discount (24-26 March)\",\n            \"time_range_start\": start_date.strftime('%Y-%m-%d %H:%M:%S'),\n            \"time_range_end\": end_date.strftime('%Y-%m-%d %H:%M:%S'),\n            \"max_discount_amount\": None,\n            \"products_with_max_discount\": [],\n            \"message\": f\"Error converting column types: {e}\"\n        }\n\n    if result is None: # Proceed if no type conversion errors\n        # 2. Date Filtering\n        filtered_df = df[(df['timestamp'] >= start_date) & (df['timestamp'] <= end_date)].copy()\n\n        # 3. Handle Empty DataFrame after filtering\n        if filtered_df.empty:\n            result = {\n                \"metric_name\": \"Max Product Discount (24-26 March)\",\n                \"time_range_start\": start_date.strftime('%Y-%m-%d %H:%M:%S'),\n                \"time_range_end\": end_date.strftime('%Y-%m-%d %H:%M:%S'),\n                \"max_discount_amount\": None,\n                \"products_with_max_discount\": [],\n                \"message\": \"No data found for the specified date range.\"\n            }\n        else:\n            # Drop rows where original_price or sale_price are null, as discount cannot be calculated\n            filtered_df.dropna(subset=['original_price', 'sale_price'], inplace=True)\n\n            # 4. Discount Calculation\n            filtered_df['discount_amount'] = filtered_df['original_price'] - filtered_df['sale_price']\n\n            # 5. Filter for Positive Discounts\n            positive_discounts_df = filtered_df[filtered_df['discount_amount'] > 0]\n\n            # 6. Handle No Positive Discounts\n            if positive_discounts_df.empty:\n                result = {\n                    \"metric_name\": \"Max Product Discount (24-26 March)\",\n                    \"time_range_start\": start_date.strftime('%Y-%m-%d %H:%M:%S'),\n                    \"time_range_end\": end_date.strftime('%Y-%m-%d %H:%M:%S'),\n                    \"max_discount_amount\": 0.0,\n                    \"products_with_max_discount\": [],\n                    \"message\": \"No positive discounts found for the specified period.\"\n                }\n            else:\n                # 7. Find Maximum Discount\n                max_discount = positive_discounts_df['discount_amount'].max()\n\n                # 8. Identify Product(s) with Max Discount\n                products_with_max_discount_df = positive_discounts_df[\n                    positive_discounts_df['discount_amount'] == max_discount\n                ]\n\n                # Prepare the list of products, handling potential product_name column\n                products_list = []\n                for _, row in products_with_max_discount_df.drop_duplicates(subset=['product_id']).iterrows():\n                    product_info = {\"product_id\": row['product_id']}\n                    if 'product_name' in df.columns:\n                        product_info['product_name'] = row.get('product_name') # Use .get to safely access\n                    products_list.append product_info\n\n                # 9. Format Output\n                result = {\n                    \"metric_name\": \"Max Product Discount (24-26 March)\",\n                    \"time_range_start\": start_date.strftime('%Y-%m-%d %H:%M:%S'),\n                    \"time_range_end\": end_date.strftime('%Y-%m-%d %H:%M:%S'),\n                    \"max_discount_amount\": round(max_discount, 2),\n                    \"products_with_max_discount\": products_list,\n                    \"message\": \"Max product discount calculated successfully.\"\n                }",
+    "iterations": 1,
+    "metadata": {
+      "execution_time_ms": 0,
+      "memory_used_mb": 0,
+      "executor_available": false
+    }
+  },
+  "analysis": "Here's an analysis of the maximum product discount:\n\n- **Max Product Discount (24-26 March):** No data was found for the specified date range (March 24, 2026, 00:00:00 to March 26, 2026, 23:59:59). Therefore, the maximum discount and associated products cannot be determined for this period.\n- **Actionable Insight:** Investigate why there is no order or product data available for the specified dates. This could indicate a data ingestion issue, an incorrect date filter, or simply a period with no sales activity or price changes.\n\n**Market Context Insights:**\nMarket context from news analysis is not available for this period, so no external factors can be correlated with the sales data.",
+  "metrics_calculated": [
+    "custom_metric"
+  ],
+  "plan": {
+    "summarized_query": "Max product discount 24-26 March",
+    "query_type": "custom_metric_generation",
+    "steps": [
+      {
+        "id": "step1",
+        "tool": "get_all_orders",
+        "params": {
+          "start_date": "2026-03-24 00:00:00",
+          "end_date": "2026-03-26 23:59:59"
+        },
+        "depends_on": [],
+        "save_as": "orders_raw"
+      },
+      {
+        "id": "step2",
+        "tool": "convert_to_df",
+        "params": {
+          "raw": "{{orders_raw}}"
+        },
+        "depends_on": [
+          "step1"
+        ],
+        "save_as": "orders_df"
+      },
+      {
+        "id": "step3",
+        "tool": "execute_custom_calculation",
+        "params": {
+          "table": "{{orders_df}}",
+          "calculation_code": "max_discount = 0\nproduct_with_max_discount = None\n\nfor index, row in df.iterrows():\n    if 'items' in row and isinstance(row['items'], list):\n        for item in row['items']:\n            if 'item_discount' in item and 'product_name' in item:\n                current_discount = item['item_discount']\n                if current_discount > max_discount:\n                    max_discount = current_discount\n                    product_with_max_discount = item['product_name']\n\nresult = {\"max_discount\": max_discount, \"product_name\": product_with_max_discount}"
+        },
+        "depends_on": [
+          "step2"
+        ],
+        "save_as": "max_discount_product"
+      }
+    ],
+    "manipulation": {
+      "required": false,
+      "type": null
+    },
+    "base_params": {
+      "start_date": "2026-03-24 00:00:00",
+      "end_date": "2026-03-26 23:59:59"
+    },
+    "tool": "get_all_orders"
+  },
+  "insights": "Here's an analysis of the maximum product discount:\n\n- **Max Product Discount (24-26 March):** No data was found for the specified date range (March 24, 2026, 00:00:00 to March 26, 2026, 23:59:59). Therefore, the maximum discount and associated products cannot be determined for this period.\n- **Actionable Insight:** Investigate why there is no order or product data available for the specified dates. This could indicate a data ingestion issue, an incorrect date filter, or simply a period with no sales activity or price changes.\n\n**Market Context Insights:**\nMarket context from news analysis is not available for this period, so no external factors can be correlated with the sales data.",
+  "metric_analysis": "Here's an analysis of the maximum product discount:\n\n- **Max Product Discount (24-26 March):** No data was found for the specified date range (March 24, 2026, 00:00:00 to March 26, 2026, 23:59:59). Therefore, the maximum discount and associated products cannot be determined for this period.\n- **Actionable Insight:** Investigate why there is no order or product data available for the specified dates. This could indicate a data ingestion issue, an incorrect date filter, or simply a period with no sales activity or price changes.\n\n**Market Context Insights:**\nMarket context from news analysis is not available for this period, so no external factors can be correlated with the sales data."
+}

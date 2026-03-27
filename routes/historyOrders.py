@@ -27,7 +27,7 @@ except Exception as e:
 router = APIRouter()
 
 DYNAMODB_REGION = os.getenv("AWS_REGION", "ap-south-1")
-DYNAMODB_TABLE_NAME = os.getenv("HISTORY_ORDERS_DYNAMODB_TABLE", "history-orders-2503")
+DYNAMODB_TABLE_NAME = os.getenv("HISTORY_ORDERS_DYNAMODB_TABLE", "history-orders")
 
 try:
     dynamodb = boto3.resource("dynamodb", region_name=DYNAMODB_REGION)
@@ -1498,6 +1498,8 @@ def _request_granularity(request: HistoryOrdersRequest) -> Optional[str]:
     return None
 
 
+
+# =================== COMPARISON =================
 @router.post('/history/comparison/cod-vs-prepaid')
 def comparison_cod_vs_prepaid(request: HistoryOrdersRequest):
     """COD vs PrePaid metrics: order count, revenue, AOV, cancellation rate, return rate."""
@@ -1872,6 +1874,7 @@ def comparison_size_mix_change(request: HistoryOrdersRequest):
         )
 
 
+# =================== CHARTS =================
 @router.post('/history/chart/orders-line')
 def chart_orders_line(request: HistoryOrdersRequest):
     """Line chart data for order count by day/week/month."""

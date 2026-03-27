@@ -5,7 +5,12 @@ import os
 import requests
 import json
 from datetime import datetime, timedelta
-import re
+from typing import Dict, Any, Optional
+from pydantic import BaseModel, Field  # Optional but recommended for schema clarity
+
+from google import genai
+from google.genai import types
+
 
 
 class OpenRouterLLM:
@@ -76,15 +81,70 @@ class OpenRouterLLM:
             print(f"OpenRouter API error: {e}")
             raise
 
+class ExecutionPlan(BaseModel):
+    """Structured schema for the planning output"""
+    summarized_query: str = Field(..., description="4-5 word summary of the user query")
+    query_type: str = Field(..., description="One of: metric_analysis|custom_metric_generation|schema_discovery|standard|comparison")
+    steps: list[Dict[str, Any]] = Field(default_factory=list, description="List of execution steps with tool, params, depends_on, save_as")
+    manipulation: Dict[str, Any] = Field(default_factory=dict, description="Whether manipulation (filter etc.) is required")
+    base_params: Dict[str, str] = Field(default_factory=dict, description="Base start_date and end_date")
+    tool: str = Field(..., description="Primary base tool (usually get_all_orders)")
 
-class PlanningLLM(OpenRouterLLM):
-    """Planning LLM - generates execution plan from natural language query using tool calling"""
-    
+
+class GeminiLLM:
+    """Base class for Gemini calls using the modern Google GenAI SDK"""
+
+    def __init__(self):
+        self.api_key = os.getenv("GEMINI_KEY")
+        self.model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")  # or gemini-1.5-flash if preferred
+
+        if not self.api_key:
+            raise ValueError("GEMINI_KEY environment variable is missing.")
+
+        self.client = genai.Client(api_key=self.api_key)
+
+    def _generate_content(
+        self,
+        prompt: str,
+        response_schema: Optional[dict] = None,
+        temperature: float = 0.2,
+        response_mime_type: Optional[str] = "application/json",
+    ) -> str:
+        """Core method to generate content with optional structured JSON output"""
+        config = types.GenerateContentConfig(
+            temperature=temperature,
+            max_output_tokens=4096,
+        )
+
+        if response_mime_type:
+            config.response_mime_type = response_mime_type
+
+        if response_schema:
+            config.response_schema = response_schema
+
+        try:
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
+                config=config,
+            )
+
+            if not response.text:
+                raise ValueError("Empty response from Gemini")
+
+            return response.text.strip()
+
+        except Exception as e:
+            print(f"[ERROR] Gemini API error: {e}")
+            raise
+
+
+class PlanningLLM(GeminiLLM):
+    """Planning LLM - generates execution plan from natural language query"""
+
     def _generate_fallback_summary(self, query: str) -> str:
-        """Generate a simple fallback summary when LLM doesn't provide one"""
-        # Simple keyword-based summary generation
+        """Simple keyword-based fallback summary"""
         query_lower = query.lower()
-        
         if any(word in query_lower for word in ['compare', 'vs', 'versus']):
             return "Compare data groups"
         elif any(word in query_lower for word in ['aov', 'average order', 'order value']):
@@ -93,321 +153,29 @@ class PlanningLLM(OpenRouterLLM):
             return "Calculate total revenue"
         elif any(word in query_lower for word in ['distribution', 'breakdown', 'split']):
             return "Analyze data distribution"
-        elif any(word in query_lower for word in ['schema', 'fields', 'structure', 'available']):
+        elif any(word in query_lower for word in ['schema', 'fields', 'structure']):
             return "Explore data schema"
         elif any(word in query_lower for word in ['sku', 'product']):
             return "Analyze product data"
         else:
             return "Analyze orders data"
-    
-    def _get_tool_definitions(self):
-        """Define available tools for the planning LLM"""
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_all_orders",
-                    "description": "Fetch order data for a date range",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "start_date": {"type": "string", "description": "Start date in YYYY-MM-DD HH:MM:SS format"},
-                            "end_date": {"type": "string", "description": "End date in YYYY-MM-DD HH:MM:SS format"}
-                        },
-                        "required": ["start_date", "end_date"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "apply_filters",
-                    "description": "Filter data by conditions (use early for optimization)",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "filters": {"type": "array", "description": "List of filter conditions"}
-                        },
-                        "required": ["filters"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_schema_info",
-                    "description": "Get schema/metadata about available fields and constraints",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "entity": {"type": "string", "description": "Entity name (e.g., 'orders')"},
-                            "field": {"type": "string", "description": "Optional: specific field name to get info for"}
-                        },
-                        "required": ["entity"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "convert_to_df",
-                    "description": "Convert fetched JSON data to pandas DataFrame (REQUIRED before any metric calculation)",
-                    "parameters": {"type": "object", "properties": {}, "required": []}
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "execute_custom_calculation",
-                    "description": "Execute custom Python calculations for complex business logic, customer lifetime value, retention rates, growth calculations, time-based metrics, custom ratios, percentages, or derived metrics",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "table": {"type": "object", "description": "DataFrame to operate on"},
-                            "calculation_code": {"type": "string", "description": "Python code string that operates on 'df' variable and assigns result to 'result' variable"},
-                            "metric_name": {"type": "string", "description": "Name for the resulting metric", "default": "custom_metric"}
-                        },
-                        "required": ["table", "calculation_code"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_aov",
-                    "description": "Calculate Average Order Value",
-                    "parameters": {"type": "object", "properties": {}, "required": []}
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_total_revenue",
-                    "description": "Calculate total revenue",
-                    "parameters": {"type": "object", "properties": {}, "required": []}
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_order_count",
-                    "description": "Get total number of orders",
-                    "parameters": {"type": "object", "properties": {}, "required": []}
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_order_status_distribution",
-                    "description": "Get distribution of order statuses",
-                    "parameters": {"type": "object", "properties": {}, "required": []}
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_payment_mode_distribution",
-                    "description": "Distribution of payment modes",
-                    "parameters": {"type": "object", "properties": {}, "required": []}
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_marketplace_distribution",
-                    "description": "Distribution of orders by marketplace",
-                    "parameters": {"type": "object", "properties": {}, "required": []}
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_state_wise_distribution",
-                    "description": "Distribution by state",
-                    "parameters": {"type": "object", "properties": {}, "required": []}
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_city_wise_distribution",
-                    "description": "Distribution by city (top N)",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "top_n": {"type": "integer", "description": "Number of top cities to show", "default": 10}
-                        }
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_courier_distribution",
-                    "description": "Distribution of orders by courier service",
-                    "parameters": {"type": "object", "properties": {}, "required": []}
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_average_discount",
-                    "description": "Calculate average discount amount",
-                    "parameters": {"type": "object", "properties": {}, "required": []}
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_average_shipping_charge",
-                    "description": "Calculate average shipping charges",
-                    "parameters": {"type": "object", "properties": {}, "required": []}
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_average_tax",
-                    "description": "Calculate average tax amount",
-                    "parameters": {"type": "object", "properties": {}, "required": []}
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_statistical_summary",
-                    "description": "Get comprehensive statistical summary (mean, median, std, quartiles) for a numeric field",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "field": {"type": "string", "description": "Numeric field name to analyze"}
-                        },
-                        "required": ["field"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_percentile",
-                    "description": "Get specific percentile for a numeric field",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "field": {"type": "string", "description": "Numeric field name"},
-                            "percentile": {"type": "number", "description": "Percentile value (0-100)"}
-                        },
-                        "required": ["field", "percentile"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_top_percentile",
-                    "description": "Get records in top percentile for a field and their metrics",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "field": {"type": "string", "description": "Field name to analyze"},
-                            "percentile": {"type": "number", "description": "Percentile threshold (default: 95)", "default": 95}
-                        },
-                        "required": ["field"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_bottom_percentile",
-                    "description": "Get records in bottom percentile for a field and their metrics",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "field": {"type": "string", "description": "Field name to analyze"},
-                            "percentile": {"type": "number", "description": "Percentile threshold (default: 5)", "default": 5}
-                        },
-                        "required": ["field"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_correlation_matrix",
-                    "description": "Calculate correlation matrix between numeric fields",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "fields": {"type": "array", "items": {"type": "string"}, "description": "List of numeric field names to correlate"}
-                        },
-                        "required": ["fields"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_conversion_rate",
-                    "description": "Calculate order conversion/delivery success rate",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "success_status": {"type": "string", "description": "Status considered successful (default: 'Delivered')", "default": "Delivered"}
-                        }
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_cod_vs_prepaid_metrics",
-                    "description": "Compare COD vs PrePaid performance with counts, revenue, and AOV",
-                    "parameters": {"type": "object", "properties": {}, "required": []}
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_geographic_insights",
-                    "description": "Get geographic distribution insights including top states/cities by orders and revenue",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "top_n": {"type": "integer", "description": "Number of top regions to show (default: 5)", "default": 5}
-                        }
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_common_metrics",
-                    "description": "Calculate standard business metrics (AOV, revenue, count, distributions) when no specific metrics are requested",
-                    "parameters": {"type": "object", "properties": {}, "required": []}
-                }
-            }
-        ]
-        
-        # Debug: Print tool definitions
-        print(f"[DEBUG] Tool definitions count: {len(tools)}")
-        print(f"[DEBUG] Tool names: {[tool['function']['name'] for tool in tools]}")
-        
-        return tools
+
+    def _get_execution_plan_schema(self) -> dict:
+        """Return JSON schema for structured output (can also use ExecutionPlan.model_json_schema())"""
+        return ExecutionPlan.model_json_schema()
 
     def invoke(self, query: str) -> dict:
-        """Generate execution plan from query with enhanced debugging"""
-        from datetime import datetime, timedelta
-        current_date = datetime.now().strftime("%Y-%m-%d")
-        
-        # Calculate date examples for the LLM
+        """Generate execution plan from natural language query"""
         today = datetime.now()
+        current_date = today.strftime("%Y-%m-%d")
         yesterday = today - timedelta(days=1)
         five_days_ago = today - timedelta(days=5)
-        
-        # Enhanced prompt with FORMAT EXAMPLES for tool calling
-        prompt = f""" You are a query planning assistant for an e-commerce order management system.
+        thirty_days_ago = today - timedelta(days=30)
+
+        prompt = f""" You are an expert query planning assistant for an e-commerce order management system.
+                    
                     Today's date is {current_date}.
+                    
                     CRITICAL: Always use actual dates in YYYY-MM-DD HH:MM:SS format, never placeholders.
                     - "last 5 days": "{five_days_ago.strftime('%Y-%m-%d')} 00:00:00" to "{today.strftime('%Y-%m-%d')} 23:59:59"
                     - "yesterday": "{yesterday.strftime('%Y-%m-%d')} 00:00:00" to "{yesterday.strftime('%Y-%m-%d')} 23:59:59"
@@ -415,7 +183,26 @@ class PlanningLLM(OpenRouterLLM):
 
                     User Query: "{query}"
 
-                    REQUIRED JSON OUTPUT FORMAT:
+                    Available tools (use these names only):
+                    get_all_orders, apply_filters, get_schema_info, convert_to_df, execute_custom_calculation,
+                    get_aov, get_total_revenue, get_order_count, get_order_status_distribution,
+                    get_payment_mode_distribution, get_marketplace_distribution, get_state_wise_distribution,
+                    get_city_wise_distribution, get_courier_distribution, get_average_discount,
+                    get_average_shipping_charge, get_average_tax, get_statistical_summary,
+                    get_percentile, get_top_percentile, get_bottom_percentile, get_correlation_matrix,
+                    get_conversion_rate, get_cod_vs_prepaid_metrics, get_geographic_insights, get_common_metrics
+
+                    QUERY TYPE GUIDELINES:
+                    - schema_discovery → use get_schema_info
+                    - metric_analysis → use specific metric tools + convert_to_df when needed
+                    - custom_metric_generation → pass intent to CustomCalculationLLM
+                    - comparison → often use get_cod_vs_prepaid_metrics or multiple metric calls
+                    - standard → simple fetch + optional filters
+
+                    Prefer built-in metric tools over custom calculation when possible.
+                    Use apply_filters early for optimization when specific conditions are mentioned.
+
+                    Template for generated plan:
                     {{
                     "summarized_query": "4-5 word summary",
                         "query_type": "metric_analysis|custom_metric_generation|schema_discovery|standard|comparison",
@@ -459,25 +246,6 @@ class PlanningLLM(OpenRouterLLM):
                     }},
                     "tool": "get_all_orders"
                     }}
-
-                    OPTIMIZATION STRATEGIES:
-                    1. **COMPREHENSIVE ANALYSIS**: Include related metrics (COD→get_cod_vs_prepaid_metrics, Revenue→get_aov+get_order_count+get_total_revenue)
-                    2. **EARLY FILTERING**: Use apply_filters before convert_to_df for large datasets  
-                    3. **CUSTOM METRICS**: Use execute_custom_calculation for complex business logic not available in standard tools
-
-                    Query Types:
-                    - "schema_discovery": Data structure/field questions
-                    - "comparison": Comparing groups (marketplaces, payment modes, etc.)  
-                    - "metric_analysis": Specific metrics (AOV, revenue, distributions)
-                    - "custom_metric_generation": Custom formula or derived metric requests that require execute_custom_calculation
-                    - "standard": Regular data fetch with optional filtering
-
-                    IMPORTANT RULES: 
-                    1. You MUST respond with a JSON object, NOT function calls. The available functions are for reference only. 
-                    2. Every response MUST include "summarized_query" field with 4-5 word summary.
-                    3. Use convert_to_df only when calculation / manipulation involved. If simple fetching of orders asked, then no need.
-                    4. For execute_custom_calculation, calculation_code must assign output to variable named 'result'.
-                    5. Prefer metric_analysis for built-in metric tools; use custom_metric_generation only when built-in tools cannot satisfy the query.
 
                     FEW-SHOT EXAMPLES:
                     These show exactly how to chain tools for different query types. Copy the structure exactly.
@@ -540,87 +308,44 @@ class PlanningLLM(OpenRouterLLM):
                         "tool": "get_all_orders"
                     }}
 
-                    Return ONLY the JSON object with the structure based on query type.
+                    Return *only* the JSON object with the structure based on query type.
 """
 
-        tools = self._get_tool_definitions()
-        
-        # Debug: Print request details
-        print(f"\\n[DEBUG] ===== TOOL CALLING PLANNING LLM DEBUG =====")
-        print(f"[DEBUG] Query: {query}")
-        print(f"[DEBUG] Tools being passed: {len(tools)} tools")
-        
-        response = self._call_api_with_tools([{"role": "user", "content": prompt}], tools, temperature=0.3)
-        
-        # Debug: Print raw LLM response
-        print(f"[DEBUG] Raw LLM response keys: {list(response.keys()) if isinstance(response, dict) else 'Not a dict'}")
-        print(f"[DEBUG] Raw LLM response: {str(response)[:300]}...")
-        
         try:
-            # Handle tool calling response format
-            response_content = response.get("content", "")
-            tool_calls = response.get("tool_calls", [])
-            
-            print(f"[DEBUG] Response content length: {len(response_content) if response_content else 0}")
-            print(f"[DEBUG] Tool calls count: {len(tool_calls)}")
-            
-            if response_content:
-                # Extract JSON from content response
-                json_start = response_content.find('{')
-                json_end = response_content.rfind('}') + 1
-                if json_start >= 0 and json_end > json_start:
-                    json_content = response_content[json_start:json_end]
-                else:
-                    json_content = response_content
-                
-                print(f"[DEBUG] Extracted JSON (first 200 chars): {json_content[:200]}...")
-                
-                plan_data = json.loads(json_content)
-                print(f"[DEBUG] Successfully parsed JSON with keys: {list(plan_data.keys())}")
-                
-                # Extract summarized_query and remove it from plan_data
-                summarized_query = plan_data.pop("summarized_query", "")
-                print(f"[DEBUG] Extracted summarized_query: '{summarized_query}'")
-                
-                # If summarized_query is empty, generate a fallback
-                if not summarized_query:
-                    summarized_query = self._generate_fallback_summary(query)
-                    print(f"[DEBUG] Generated fallback summary: '{summarized_query}'")
-                
-                return {
-                    "success": True,
-                    "plan": plan_data,
-                    "summarized_query": summarized_query
-                }
-            elif tool_calls:
-                print(f"[DEBUG] Unexpected tool calls in response: {tool_calls}")
-                return {
-                    "success": False,
-                    "error": "LLM tried to call tools instead of returning JSON"
-                }
-            else:
-                print(f"[DEBUG] No content or tool calls found in response")
-                return {
-                    "success": False,
-                    "error": "No content or tool calls in response"
-                }
-                    
+            print(f"[DEBUG] Planning query: {query}")
+
+            response_text = self._generate_content(
+                prompt=prompt,
+                # Gemini structured output rejects schemas that include additionalProperties
+                # (generated by Dict[...] fields), so we parse JSON manually and validate locally.
+                response_schema=None,
+                temperature=0.1,   # Low temperature for consistency
+            )
+
+            plan_data = json.loads(response_text)
+
+            # Validate with Pydantic (optional but recommended)
+            validated_plan = ExecutionPlan.model_validate(plan_data)
+
+            summarized_query = validated_plan.summarized_query
+            if not summarized_query:
+                summarized_query = self._generate_fallback_summary(query)
+
+            return {
+                "success": True,
+                "plan": validated_plan.model_dump(),           # or validated_plan.model_dump()
+                "summarized_query": summarized_query
+            }
+
         except json.JSONDecodeError as e:
-            print(f"[ERROR] Failed to parse plan JSON: {e}")
-            print(f"[ERROR] Response content: {response}")
-            return {
-                "success": False,
-                "error": f"Failed to parse plan: {str(e)}"
-            }
+            print(f"[ERROR] Failed to parse JSON from Gemini: {e}")
+            print(f"[DEBUG] Raw response: {response_text[:500]}...")
+            return {"success": False, "error": f"JSON parse error: {str(e)}"}
         except Exception as e:
-            print(f"[ERROR] Error processing response: {e}")
-            return {
-                "success": False,
-                "error": f"Error processing response: {str(e)}"
-            }
+            print(f"[ERROR] Planning failed: {e}")
+            return {"success": False, "error": str(e)}
 
-
-class FilteringLLM(OpenRouterLLM):
+class FilteringLLM(GeminiLLM):
     """Filtering LLM - extracts filter parameters from natural language"""
     
     def invoke(self, params: dict) -> dict:
@@ -688,7 +413,12 @@ DO NOT INCLUDE:
 
 Return ONLY the JSON, no other text."""
 
-        response = self._call_api([{"role": "user", "content": prompt}], temperature=0.2)
+        response = self._generate_content(
+            prompt=prompt,
+            response_schema=None,
+            temperature=0.2,
+            response_mime_type="text/plain",
+        )
         
         try:
             json_start = response.find('{')
@@ -703,7 +433,7 @@ Return ONLY the JSON, no other text."""
             return {"filters": []}
 
 
-class GroupingLLM(OpenRouterLLM):
+class GroupingLLM(GeminiLLM):
     """Grouping LLM - extracts comparison groups from query"""
     
     def invoke(self, params: dict) -> dict:
@@ -757,7 +487,12 @@ Response: {{
 
 Return ONLY the JSON, no other text."""
 
-        response = self._call_api([{"role": "user", "content": prompt}], temperature=0.3)
+        response = self._generate_content(
+            prompt=prompt,
+            response_schema=None,
+            temperature=0.3,
+            response_mime_type="text/plain",
+        )
         
         try:
             json_start = response.find('{')
@@ -772,7 +507,7 @@ Return ONLY the JSON, no other text."""
             return {"groups": []}
 
 
-class MetricLLM(OpenRouterLLM):
+class MetricLLM(GeminiLLM):
     """Metric analysis LLM - generates insights from calculated metrics"""
     
     def invoke(self, params: dict) -> dict:
@@ -819,7 +554,12 @@ Example:
 - **Revenue Performance:** Maharashtra generated ₹282,699 total revenue compared to Telangana's ₹106,043 
 """
 
-        response = self._call_api([{"role": "user", "content": prompt}], temperature=0.5)
+        response = self._generate_content(
+            prompt=prompt,
+            response_schema=None,
+            temperature=0.5,
+            response_mime_type="text/plain",
+        )
         
         return {
             "analysis": response.strip(),
@@ -827,7 +567,7 @@ Example:
         }
 
 
-class NewsRetrievalLLM(OpenRouterLLM):
+class NewsRetrievalLLM(GeminiLLM):
     """News retrieval LLM - fetches and analyzes relevant news for market context"""
     
     def __init__(self):
@@ -989,11 +729,16 @@ Provide insights in this format:
 Be specific about correlations between news events and your sales data. All monetary values in INR.
 """
 
-        response = self._call_api([{"role": "user", "content": prompt}], temperature=0.6)
+        response = self._generate_content(
+            prompt=prompt,
+            response_schema=None,
+            temperature=0.6,
+            response_mime_type="text/plain",
+        )
         return response.strip()
 
 
-class InsightLLM(OpenRouterLLM):
+class InsightLLM(GeminiLLM):
     """Insight generation LLM - creates natural language summaries with market context"""
     
     def invoke(self, params: dict) -> dict:
@@ -1112,7 +857,12 @@ MARKET CONTEXT INSIGHTS (if available):
 Make insights actionable and business-focused for footwear e-commerce.
 """
 
-        response = self._call_api([{"role": "user", "content": prompt}], temperature=0.7)
+        response = self._generate_content(
+            prompt=prompt,
+            response_schema=None,
+            temperature=0.7,
+            response_mime_type="text/plain",
+        )
         
         return {
             "insights": response.strip(),
@@ -1132,6 +882,379 @@ Make insights actionable and business-focused for footwear e-commerce.
         return any(keyword in query.lower() for keyword in context_keywords)
 
 
+class CustomCalculationLLM(GeminiLLM):
+    """Custom Calculation LLM - generates and iteratively refines Python code for custom metrics using ReAct pattern"""
+    
+    def __init__(self):
+        super().__init__()
+        self.max_iterations = 3  # Maximum ReAct loop iterations
+        self.iteration_count = 0
+        self.thought_action_history = []
+        self.executor = None  # Will be set to execute_custom_calculation tool
+    
+    def invoke(self, params: dict) -> dict:
+        """
+        Generate and execute custom Python calculations using ReAct pattern.
+        
+        Args:
+            params: {
+                "query": str,  # Original user query
+                "intent": str,  # Intent from planning LLM (e.g., "Calculate net revenue per order")
+                "data": DataFrame,  # The DataFrame to operate on
+                "schema": dict,  # Available fields and their types
+                "date_range": dict,  # start_date and end_date for context
+                "executor": callable  # Optional: execute_custom_calculation tool function
+            }
+        """
+        user_query = params.get("query", "")
+        intent = params.get("intent", "")
+        data = params.get("data")
+        schema = params.get("schema", {})
+        date_range = params.get("date_range", {})
+        executor = params.get("executor")  # Tool function if available
+
+        # Sanity checks to avoid silent placeholder results.
+        if data is None:
+            return {
+                "success": False,
+                "error": "CustomCalculationLLM invoked without `data`",
+                "reasoning_history": []
+            }
+
+        if executor is None:
+            return {
+                "success": False,
+                "error": "CustomCalculationLLM invoked without `executor`",
+                "reasoning_history": []
+            }
+
+        data_type = type(data).__name__
+        data_shape = getattr(data, "shape", None)
+
+        # print(f"[CustomCalculationLLM] ")
+        print(f"[CustomCalculationLLM] schema fields: ", list(schema), flush=True)
+        print(f"[CustomCalculationLLM] data received: type={data_type}, shape={data_shape}", flush=True)
+
+        self.iteration_count = 0
+        self.thought_action_history = []
+        self.executor = executor
+        
+        print(f"[CustomCalculationLLM] Starting ReAct loop for: {intent}", flush=True)
+        print(f"[CustomCalculationLLM] Executor available: {executor is not None}", flush=True)
+        
+        while self.iteration_count < self.max_iterations:
+            self.iteration_count += 1
+            print(f"\n[ReAct Iteration {self.iteration_count}/{self.max_iterations}]", flush=True)
+            
+            # THOUGHT phase
+            thought = self._generate_thought(user_query, intent, schema, date_range)
+            print(f"[THOUGHT] {thought}", flush=True)
+            
+            # ACTION phase - Generate Python code
+            code = self._generate_python_code(user_query, intent, schema, thought, self.thought_action_history)
+            print(f"[ACTION] Generated code:\n{code}", flush=True)
+            
+            # OBSERVATION phase - Execute code and observe results
+            observation = self._execute_and_observe(code)
+            print(f"[OBSERVATION] {observation}", flush=True)
+            
+            # Record in history for next iteration context
+            self.thought_action_history.append({
+                "iteration": self.iteration_count,
+                "thought": thought,
+                "code": code,
+                "observation": observation
+            })
+            
+            # REFLECTION phase - Check if calculation is valid
+            is_valid, validation_message = self._validate_result(observation, intent)
+            print(f"[VALIDATION] Valid={is_valid}, Message={validation_message}", flush=True)
+            
+            if is_valid:
+                print(f"[SUCCESS] Calculation completed successfully in iteration {self.iteration_count}", flush=True)
+                return {
+                    "success": True,
+                    "final_result": observation.get("result"),
+                    "calculation_code": code,
+                    "iterations": self.iteration_count,
+                    "intent": intent,
+                    "metadata": observation.get("metadata", {}),
+                    "reasoning_history": self.thought_action_history
+                }
+            
+            # If not valid, refine for next iteration
+            if self.iteration_count < self.max_iterations:
+                print(f"[REFINE] Will attempt refinement in next iteration", flush=True)
+        
+        # Max iterations reached without success
+        print(f"[FAILURE] Max iterations ({self.max_iterations}) reached without valid result", flush=True)
+        return {
+            "success": False,
+            "error": f"Could not generate valid calculation after {self.max_iterations} iterations",
+            "last_observation": self.thought_action_history[-1].get("observation") if self.thought_action_history else None,
+            "reasoning_history": self.thought_action_history
+        }
+    
+    def _execute_and_observe(self, code: str) -> dict:
+        """
+        OBSERVATION phase: Execute the generated code and observe results.
+        Uses the executor tool if available, otherwise returns placeholder.
+        """
+        if not self.executor:
+            # Placeholder for when executor is not available
+            print(f"[EXECUTE] Code execution placeholder (no executor provided)", flush=True)
+            return {
+                "status": "executed",
+                "result": None,
+                "error": None,
+                "metadata": {
+                    "execution_time_ms": 0,
+                    "memory_used_mb": 0,
+                    "executor_available": False
+                }
+            }
+        
+        try:
+            # Execute code using the provided executor tool
+            print(f"[EXECUTE] Executing code via provided executor", flush=True)
+            
+            import time
+            start_time = time.time()
+            
+            result = self.executor(
+                calculation_code=code,
+                metric_name=f"custom_metric_iter{self.iteration_count}"
+            )
+            
+            execution_time = (time.time() - start_time) * 1000  # ms
+            
+            # Transform tool result into observation format
+            if result.get("success"):
+                observation = {
+                    "status": "executed",
+                    "result": result.get("result"),  # execute_custom_calculation returns `result`
+                    "error": None,
+                    "metadata": {
+                        "execution_time_ms": execution_time,
+                        "memory_used_mb": 0,
+                        "executor_available": True,
+                        "tool_result": result
+                    }
+                }
+            else:
+                observation = {
+                    "status": "error",
+                    "result": None,
+                    "error": result.get("error", "Unknown error"),
+                    "metadata": {
+                        "execution_time_ms": execution_time,
+                        "memory_used_mb": 0,
+                        "executor_available": True,
+                        "tool_result": result
+                    }
+                }
+            
+            return observation
+            
+        except Exception as e:
+            print(f"[EXECUTE] Error during execution: {str(e)}", flush=True)
+            return {
+                "status": "error",
+                "result": None,
+                "error": str(e),
+                "metadata": {
+                    "error_type": type(e).__name__,
+                    "executor_available": True
+                }
+            }
+    
+    def _validate_result(self, observation: dict, intent: str) -> tuple:
+        """
+        REFLECTION phase: Validate if the calculation result is meaningful and valid.
+        
+        Returns:
+            (is_valid: bool, message: str)
+        """
+        if observation.get("error"):
+            return False, f"Execution error: {observation['error']}"
+        
+        if observation.get("status") != "executed":
+            # Allow "executed" status - executor may not be available yet
+            if observation.get("status") != "executed" and observation.get("metadata", {}).get("executor_available"):
+                return False, f"Unexpected status: {observation.get('status')}"
+        
+        result = observation.get("result")
+        
+        # Check if result exists
+        if result is None:
+            # Only fail if executor was available
+            if observation.get("metadata", {}).get("executor_available"):
+                return False, "Result is None - calculation may be incomplete"
+            else:
+                # Placeholder mode - accept None result
+                return True, "Placeholder result accepted (executor pending)"
+        
+        # Type validations based on intent
+        if any(word in intent.lower() for word in ["count", "number", "total"]):
+            if not isinstance(result, (int, float)):
+                return False, f"Expected numeric result, got {type(result)}"
+        
+        # Check for NaN or inf
+        if isinstance(result, float):
+            import math
+            if math.isnan(result):
+                return False, "Result is NaN - invalid calculation"
+        
+        return True, "Calculation valid and complete"
+    
+    def _format_schema(self, schema: dict) -> str:
+        """Format schema information for prompt."""
+        if not schema:
+            return "No schema information available"
+        
+        schema_lines = []
+        for field, info in schema.items():
+            field_type = info.get('type', 'unknown')
+            example = info.get('example', 'N/A')
+            is_categorical = info.get('is_categorical', False)
+            
+            schema_lines.append(f"- {field} ({field_type}): example={example}")
+            
+            if is_categorical and info.get('enum'):
+                enum_values = info['enum'][:5]
+                schema_lines.append(f"  Possible values: {enum_values}")
+        
+        return "\n".join(schema_lines)
+    
+    def _generate_thought(self, user_query: str, intent: str, schema: dict, date_range: dict) -> str:
+        """
+        THOUGHT phase: Generate reasoning about the calculation approach.
+        """
+        schema_desc = self._format_schema(schema)
+        
+        history_context = ""
+        if self.thought_action_history:
+            history_context = "\n\nPrevious Iteration(s):\n"
+            for entry in self.thought_action_history:
+                history_context += f"- Iteration {entry['iteration']}: {entry['observation'].get('status', 'unknown')}\n"
+                if entry['observation'].get('error'):
+                    history_context += f"  Error was: {entry['observation']['error']}\n"
+        
+        prompt = f"""You are a data analysis expert. Analyze the following custom metric request and plan your Python implementation.
+
+USER QUERY: "{user_query}"
+CALCULATION INTENT: "{intent}"
+
+Time Range: {date_range.get('start_date', 'N/A')} to {date_range.get('end_date', 'N/A')}
+
+Available DataFrame Columns:
+{schema_desc}
+
+{history_context}
+
+TASK: Break down the calculation into steps and explain your approach.
+
+Think about:
+1. Which columns from the DataFrame are needed?
+2. What transformations or aggregations are required?
+3. What edge cases might exist (nulls, empty data, etc.)?
+4. What should the expected output look like?
+
+Provide a concise thought process (3-4 sentences max)."""
+
+        response = self._generate_content(
+            prompt=prompt,
+            response_schema=None,
+            temperature=0.3,
+            response_mime_type="text/plain",
+        )
+        return response.strip()
+    
+    def _generate_python_code(self, user_query: str, intent: str, schema: dict, thought: str, history: list) -> str:
+        """
+        ACTION phase: Generate Python code for the calculation.
+        """
+        schema_desc = self._format_schema(schema)
+        
+        history_context = ""
+        if history:
+            history_context = "\n\nPrevious Attempts:\n"
+            for entry in history:
+                history_context += f"\nIteration {entry['iteration']}:\n"
+                history_context += f"Code tried:\n```python\n{entry['code']}\n```\n"
+                if entry['observation'].get('error'):
+                    history_context += f"Error: {entry['observation']['error']}\n"
+                    history_context += f"Feedback: Learn from this error and provide corrected code.\n"
+        
+        prompt = f"""You are an expert Python data analyst. Generate Python code to calculate the requested metric.
+
+USER QUERY: "{user_query}"
+CALCULATION INTENT: "{intent}"
+
+YOUR REASONING FROM PREVIOUS STEP: {thought}
+
+Available DataFrame Columns and Sample Data:
+{schema_desc}
+
+{history_context}
+
+CRITICAL REQUIREMENTS:
+1. Input variable MUST be 'df' (pandas DataFrame). Remember to load input database as pandas df first.
+2. Final result MUST be stored in variable 'result'
+3. Handle edge cases: empty data, null values, type conversions
+4. Use pandas/numpy operations (no loops for large data)
+5. Include data validation (check if df is empty, required columns exist)
+6. Provide clear variable names and comments
+7. Return the calculated metric as a single value or simple dict
+8. DO NOT write any import statements (`import ...` or `from ... import ...`)
+9. Assume `pd`, `np`, `math`, and `datetime` are already available
+
+CODE STRUCTURE TEMPLATE:
+```python
+# Result calculation
+if df.empty:
+    result = None  # or handle appropriately
+else:
+    # Your calculation logic here
+    result = <calculated_value>
+```
+
+Generate ONLY the Python code. Start with triple backticks [python]. No explanation needed."""
+
+        response = self._generate_content(
+            prompt=prompt,
+            response_schema=None,
+            temperature=0.2,
+            response_mime_type="text/plain",
+        )
+        
+        # Extract code from markdown if wrapped
+        code = response.strip()
+        if code.startswith("```python"):
+            code = code[9:]
+        if code.startswith("```"):
+            code = code[3:]
+        if code.endswith("```"):
+            code = code[:-3]
+
+        # Tool-side validator blocks imports; strip them defensively.
+        sanitized_lines = []
+        removed_imports = 0
+        for line in code.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("import ") or stripped.startswith("from "):
+                removed_imports += 1
+                continue
+            sanitized_lines.append(line)
+
+        if removed_imports > 0:
+            print(f"[CustomCalculationLLM] Removed {removed_imports} import line(s) from generated code", flush=True)
+
+        code = "\n".join(sanitized_lines)
+        
+        return code.strip()
+
+
 #provide RAG business logic to both - Metric & Insight LLM
 planning_llm = PlanningLLM()
 filtering_llm = FilteringLLM()
@@ -1139,3 +1262,4 @@ grouping_llm = GroupingLLM()
 insight_llm = InsightLLM()
 metric_llm = MetricLLM()
 news_llm = NewsRetrievalLLM()
+custom_calculation_llm = CustomCalculationLLM()

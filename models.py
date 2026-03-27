@@ -14,6 +14,12 @@ def _default_start_date() -> str:
 class QueryRequest(BaseModel):
     query: str
 
+
+class ExecuteRequest(BaseModel):
+    query: str
+    plan: Dict[str, Any]
+    summarized_query: Optional[str] = None
+
 class HealthResponse(BaseModel):
     status: str
     service: str
@@ -27,7 +33,7 @@ class GeographyRequest(BaseModel):
 
 class HistoryOrdersRequest(BaseModel):
     """Request model for historical orders queries from DyanmoDB"""
-    table_name: str = "history-orders-2503"
+    table_name: str = "history-orders"
     start_date: str = Field(default_factory=_default_start_date)
     end_date: str = Field(default_factory=_default_end_date)
     filters: Optional[Dict[str, Any]] = None

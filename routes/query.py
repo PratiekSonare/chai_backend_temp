@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from decimal import Decimal
 from fastapi import APIRouter, HTTPException, Header, Request
-from models import QueryRequest
+from models import QueryRequest, ExecuteRequest
 from workflow import app as workflow_app, AgentState
 from llm_providers import planning_llm
 from utils.request_log_store import append_request_log, read_request_logs, get_latest_sequence
@@ -164,35 +164,13 @@ async def generate_plan(request: QueryRequest):
             }
         )
 
-@router.post('/query')
-async def process_query(
-    request: QueryRequest,
-    raw_request: Request,
-    x_request_id: str | None = Header(default=None, alias="X-Request-ID")
+
+async def _run_workflow_request(
+    user_query: str,
+    request_id: str,
+    precomputed_plan: dict | None = None,
+    summarized_query: str | None = None,
 ):
-    """
-    Process a natural language query
-    
-    Request body:
-    {
-        "query": "Show me orders from last 5 days with payment mode prepaid"
-    }
-    
-    Response:
-    {
-        "success": true,
-        "data": [...],
-        "insights": "...",
-        "metadata": {...}
-    }
-    """
-
-    print("running query...", flush=True)
-
-    # Use request id from middleware/header if available.
-    user_query = request.query.strip()
-    request_id = getattr(raw_request.state, "request_id", None) or x_request_id or str(uuid.uuid4())[:8]
-
     append_request_log(
         request_id=request_id,
         step_key="REQUEST_START",
@@ -218,7 +196,7 @@ async def process_query(
             "error": REQUEST_CANCELLED_ERROR,
             "logs": read_request_logs(request_id),
         }
-    
+
     try:
         async def workflow_logger(
             req_id: str,
@@ -238,8 +216,8 @@ async def process_query(
 
         initial_state = AgentState(
             user_query=user_query,
-            summarized_query=None,
-            plan=None,
+            summarized_query=summarized_query,
+            plan=precomputed_plan,
             tool_result_refs={},
             tool_result_schemas={},
             current_step_index=0,
@@ -250,7 +228,7 @@ async def process_query(
             logger=workflow_logger,
             request_id=request_id,
             cancel_checker=is_query_cancelled,
-            comparison_mode=False,  # Will be set by planning LLM
+            comparison_mode=False,  # Will be set by planning LLM or inferred from provided plan
             comparison_groups=None,
             group_results=None,
             group_schemas=None,
@@ -262,7 +240,7 @@ async def process_query(
             metric_analysis=None,
             metrics_calculated=None
         )
-        
+
         # Run workflow
         print("running state...", flush=True)
         result = await workflow_app.ainvoke(initial_state)
@@ -321,22 +299,22 @@ async def process_query(
                     "request_id": request_id
                 }
             )
-        
+
         # Get final result
         if result.get("final_result_ref"):
             print(f"retrieving cached result for: {result['final_result_ref']}", flush=True)
             from workflow import get_cached_result
-            
+
             try:
                 final_data = get_cached_result(result["final_result_ref"])
                 print(f"cached result retrieved, type: {type(final_data)}, length: {len(final_data) if isinstance(final_data, (list, dict)) else 'N/A'}", flush=True)
-                
+
                 # Convert numpy types to JSON-serializable types
                 final_data = convert_numpy_types(final_data)
-                
+
                 # Get query type from the plan
                 query_type = result.get("plan", {}).get("query_type", "standard")
-                
+
                 # Handle different response formats based on query type
                 if query_type == "comparison" and isinstance(final_data, dict) and "insights" in final_data:
                     # Comparison query response
@@ -368,7 +346,7 @@ async def process_query(
                     # Schema discovery response
                     response_data = {
                         "success": True,
-                        "query_type": "schema_discovery", 
+                        "query_type": "schema_discovery",
                         "request_id": request_id,
                         "logs": read_request_logs(request_id),
                         "summarized_query": result.get("summarized_query", ""),
@@ -398,9 +376,9 @@ async def process_query(
                             "data": final_data,
                             "total_records": record_count
                         }
-                
+
                 print("response constructed successfully", flush=True)
-                
+
             except Exception as cache_error:
                 print(f"error retrieving cached result: {cache_error}", flush=True)
                 raise HTTPException(
@@ -417,24 +395,24 @@ async def process_query(
                 if result.get("insights"):
                     print(f"adding insights: {type(result['insights'])}", flush=True)
                     response_data["insights"] = result["insights"]
-                
+
                 # Add metric analysis if available
                 if result.get("metric_analysis"):
                     print(f"adding metric analysis: {type(result['metric_analysis'])}", flush=True)
                     response_data["metric_analysis"] = result["metric_analysis"]
-                
+
                 # Add comparison results if available
                 if result.get("comparison_results"):
                     print(f"adding comparison results: {type(result['comparison_results'])}", flush=True)
                     response_data["comparison_results"] = result["comparison_results"]
                     response_data["comparison_groups"] = result.get("comparison_groups", [])
-                
+
                 print("optional fields added successfully", flush=True)
-                
+
             except Exception as field_error:
                 print(f"error adding optional fields: {field_error}", flush=True)
                 # Continue without the optional fields rather than failing
-            
+
             try:
                 print(f"returning response_data keys: {list(response_data.keys())}", flush=True)
                 # Convert all numpy types in response data to JSON-serializable types
@@ -450,22 +428,22 @@ async def process_query(
                         "request_id": request_id
                     }
                 )
-        
+
         # Fallback: If final_result_ref is missing but we have tool_result_refs, try to use the last result
         elif result.get("tool_result_refs") and result.get("plan") and result["plan"].get("steps"):
             print("final_result_ref missing, trying fallback...", flush=True)
             from workflow import get_cached_result
-            
+
             try:
                 # Get the last step result
                 last_step = result["plan"]["steps"][-1]
                 if "save_as" in last_step and last_step["save_as"] in result["tool_result_refs"]:
                     last_result_ref = result["tool_result_refs"][last_step["save_as"]]
                     final_data = get_cached_result(last_result_ref)
-                    
+
                     # Convert numpy types to JSON-serializable types
                     final_data = convert_numpy_types(final_data)
-                    
+
                     response_data = {
                         "success": True,
                         "request_id": request_id,
@@ -473,17 +451,17 @@ async def process_query(
                         "data": final_data,
                         "metadata": {"source": "fallback_last_step"}
                     }
-                    
+
                     # Convert the entire response data as well
                     response_data = convert_numpy_types(response_data)
-                    
+
                     print("fallback successful", flush=True)
                     return response_data
                 else:
                     print("fallback failed: save_as missing or not in tool_result_refs", flush=True)
             except Exception as fallback_error:
                 print(f"fallback error: {fallback_error}", flush=True)
-        
+
         raise HTTPException(
             status_code=500,
             detail={
@@ -495,3 +473,58 @@ async def process_query(
 
     finally:
         clear_query_registry_entry(request_id)
+
+@router.post('/query')
+async def process_query(
+    request: QueryRequest,
+    raw_request: Request,
+    x_request_id: str | None = Header(default=None, alias="X-Request-ID")
+):
+    """
+    Process a natural language query
+    
+    Request body:
+    {
+        "query": "Show me orders from last 5 days with payment mode prepaid"
+    }
+    
+    Response:
+    {
+        "success": true,
+        "data": [...],
+        "insights": "...",
+        "metadata": {...}
+    }
+    """
+
+    print("running query...", flush=True)
+
+    # Use request id from middleware/header if available.
+    user_query = request.query.strip()
+    request_id = getattr(raw_request.state, "request_id", None) or x_request_id or str(uuid.uuid4())[:8]
+
+    return await _run_workflow_request(
+        user_query=user_query,
+        request_id=request_id,
+    )
+
+
+@router.post('/execute')
+async def execute_plan(
+    request: ExecuteRequest,
+    raw_request: Request,
+    x_request_id: str | None = Header(default=None, alias="X-Request-ID")
+):
+    """Execute a pre-generated plan without running the planning LLM again."""
+    print("running execute...", flush=True)
+
+    user_query = request.query.strip()
+    request_id = getattr(raw_request.state, "request_id", None) or x_request_id or str(uuid.uuid4())[:8]
+    summarized_query = request.summarized_query or user_query[:120]
+
+    return await _run_workflow_request(
+        user_query=user_query,
+        request_id=request_id,
+        precomputed_plan=request.plan,
+        summarized_query=summarized_query,
+    )

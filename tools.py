@@ -13,6 +13,7 @@ import boto3
 import re
 import signal
 import sys
+import math
 from utils.type_converters import convert_numpy_types
 
 s3 = boto3.client('s3')
@@ -98,7 +99,13 @@ def _execute_custom_code_with_timeout(calculation_code: str, local_vars: dict, s
                 # signal.alarm is only available in the main thread on some runtimes.
                 timeout_supported = False
 
-        exec(calculation_code, {"__builtins__": safe_builtins}, local_vars)
+        # Use one shared execution namespace so comprehensions/lambdas can
+        # resolve variables like `df` consistently.
+        exec_scope = {"__builtins__": safe_builtins, **local_vars}
+        exec(calculation_code, exec_scope, exec_scope)
+
+        # Persist any values (including `result`) back to local_vars for callers.
+        local_vars.update(exec_scope)
     finally:
         if timeout_supported:
             signal.alarm(0)
@@ -657,131 +664,100 @@ def get_common_metrics(data) -> dict:
         return {"error": f"Failed to calculate metrics: {str(e)}"}
 
 
-def execute_custom_calculation(table: pd.DataFrame, calculation_code: str, metric_name: str = "custom_metric") -> dict:
+def execute_custom_calculation(
+    table: pd.DataFrame, 
+    calculation_code: str, 
+    metric_name: str = "custom_metric"
+) -> dict:
     """
-    Execute custom Python calculation on DataFrame
-    
-    Args:
-        table: DataFrame to operate on
-        calculation_code: Python code string that operates on 'df' variable
-        metric_name: Name for the resulting metric
-    
-    Returns:
-        dict: Custom calculation result
-    
-    Example:
-        code = "result = df.groupby('customer_email')['total_amount'].sum().mean()"
-        execute_custom_calculation(orders_df, code, "avg_customer_value")
+    Safe execution of LLM-generated Python code for custom metrics on a DataFrame.
+    Designed for REPL-like usage where the LLM can generate one-off calculations.
     """
-    try:
-        # Validate metric_name format
-        if not _is_valid_metric_name(metric_name):
-            return {
-                metric_name if isinstance(metric_name, str) and metric_name else "custom_metric": None,
-                "error": "Invalid metric_name. Use alphanumeric characters and underscores only.",
-                "calculation_code": calculation_code[:500] if isinstance(calculation_code, str) else "",
-                "success": False
-            }
+    if not isinstance(calculation_code, str) or not calculation_code.strip():
+        return {
+            "success": False,
+            "error": "Calculation code cannot be empty",
+            "metric_name": metric_name,
+            "calculation_code": ""
+        }
 
-        # Validate custom code AST and constraints
+    try:
+        # Basic validations
+        if not _is_valid_metric_name(metric_name):
+            return _error_response(metric_name, "Invalid metric name. Use only letters, numbers, and underscores.", calculation_code)
+
+        if table.empty:
+            return _error_response(metric_name, "DataFrame is empty", calculation_code)
+
+        # Strict code validation (this is the most important layer)
         is_valid, validation_message = _validate_custom_calculation_code(calculation_code)
         if not is_valid:
-            return {
-                metric_name: None,
-                "error": f"Code validation failed: {validation_message}",
-                "calculation_code": calculation_code[:500],
-                "success": False
-            }
+            return _error_response(metric_name, f"Code validation failed: {validation_message}", calculation_code)
 
-        # Validate input
-        if table.empty:
-            return {
-                metric_name: None,
-                "error": "Empty DataFrame provided",
-                "calculation_code": calculation_code,
-                "success": False
-            }
-        
-        # Create safe execution environment
-        import math
+        # Prepare safe environment
         local_vars = {
-            'df': table.copy(),
+            'df': table.copy(),           # always give a copy
             'pd': pd,
             'np': np,
             'math': math,
             'datetime': datetime,
-            'result': None
+            'result': None,
+            # Common helpful aliases
+            'df': table.copy(),  # redundant but clear
         }
-        
-        # Restricted builtins to prevent dangerous operations
-        safe_builtins = {
-            'len': len,
-            'max': max,
-            'min': min,
-            'sum': sum,
-            'abs': abs,
-            'round': round,
-            'sorted': sorted,
-            'enumerate': enumerate,
-            'range': range,
-            'zip': zip,
-            'any': any,
-            'all': all,
-            'bool': bool,
-            'int': int,
-            'float': float,
-            'str': str,
-            'list': list,
-            'dict': dict,
-            'set': set,
-            'tuple': tuple
-        }
-        
-        # Execute the custom code with restricted environment
-        _execute_custom_code_with_timeout(calculation_code, local_vars, safe_builtins)
-        
-        # Get the result (code should assign to 'result' variable)
-        result = local_vars.get('result', None)
-        
-        if result is None:
-            return {
-                metric_name: None,
-                "error": "No 'result' variable found in calculation code",
-                "calculation_code": calculation_code,
-                "success": False
-            }
 
-        result_size = sys.getsizeof(result)
-        if result_size > MAX_CUSTOM_RESULT_SIZE:
-            return {
-                metric_name: None,
-                "error": f"Result too large ({result_size} bytes). Max allowed: {MAX_CUSTOM_RESULT_SIZE} bytes",
-                "calculation_code": calculation_code[:500],
-                "success": False
-            }
-        
+        safe_builtins = {
+            'len': len, 'max': max, 'min': min, 'sum': sum, 'abs': abs,
+            'round': round, 'sorted': sorted, 'enumerate': enumerate,
+            'range': range, 'zip': zip, 'any': any, 'all': all,
+            'bool': bool, 'int': int, 'float': float, 'str': str,
+            'list': list, 'dict': dict, 'set': set, 'tuple': tuple,
+        }
+
+        # Execute with timeout protection
+        _execute_custom_code_with_timeout(calculation_code, local_vars, safe_builtins)
+
+        result = local_vars.get('result')
+        if result is None:
+            return _error_response(
+                metric_name, 
+                "Your code must assign the final value to a variable named `result`", 
+                calculation_code
+            )
+
+        # Size guard
+        if sys.getsizeof(result) > MAX_CUSTOM_RESULT_SIZE:
+            return _error_response(
+                metric_name, 
+                f"Result too large ({sys.getsizeof(result)} bytes). Max: {MAX_CUSTOM_RESULT_SIZE} bytes", 
+                calculation_code
+            )
+
         result = convert_numpy_types(result)
-        
+
         return {
-            metric_name: result,
+            "success": True,
+            "metric_name": metric_name,
+            "result": result,
             "calculation_code": calculation_code,
-            "success": True
+            "row_count": len(table)
         }
-        
-    except TimeoutError as e:
-        return {
-            metric_name: None,
-            "error": str(e),
-            "calculation_code": calculation_code[:500] if isinstance(calculation_code, str) else "",
-            "success": False
-        }
+
+    except TimeoutError:
+        return _error_response(metric_name, f"Calculation timed out after {CUSTOM_CALC_TIMEOUT_SECONDS} seconds", calculation_code)
     except Exception as e:
-        return {
-            metric_name: None,
-            "error": f"Calculation error: {str(e)}",
-            "calculation_code": calculation_code[:500] if isinstance(calculation_code, str) else "",
-            "success": False
-        }
+        return _error_response(metric_name, f"Execution error: {type(e).__name__}: {str(e)}", calculation_code)
+
+
+def _error_response(metric_name: str, error: str, code: str) -> dict:
+    """Helper for consistent error format"""
+    return {
+        "success": False,
+        "metric_name": metric_name,
+        "error": error,
+        "calculation_code": code[:600] if isinstance(code, str) else "",
+        "result": None
+    }
 
 def get_geographic_insights(table: pd.DataFrame, top_n: int = 5) -> dict:
     """Get geographic distribution insights"""
