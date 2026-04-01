@@ -1,0 +1,52 @@
+{
+  "success": true,
+  "query": "calculate yesterdays aov.",
+  "plan": {
+    "summarized_query": "AOV yesterday",
+    "query_type": "metric_analysis",
+    "steps": [
+      {
+        "id": "step1",
+        "tool": "get_all_orders",
+        "params": {
+          "start_date": "2026-03-30 00:00:00",
+          "end_date": "2026-03-30 23:59:59"
+        },
+        "depends_on": [],
+        "save_as": "orders_raw"
+      },
+      {
+        "id": "step2",
+        "tool": "convert_to_df",
+        "params": {
+          "raw": "{{orders_raw}}"
+        },
+        "depends_on": [
+          "step1"
+        ],
+        "save_as": "orders_df"
+      },
+      {
+        "id": "step3",
+        "tool": "get_aov",
+        "params": {
+          "table": "{{orders_df}}"
+        },
+        "depends_on": [
+          "step2"
+        ],
+        "save_as": "aov_result"
+      }
+    ],
+    "manipulation": {
+      "required": false,
+      "type": null
+    },
+    "base_params": {
+      "start_date": "2026-03-30 00:00:00",
+      "end_date": "2026-03-30 23:59:59"
+    },
+    "tool": "get_all_orders"
+  },
+  "is_comparison": false
+}

@@ -1,6 +1,5 @@
 import os
 import uuid
-import uvicorn
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, Request
@@ -34,7 +33,8 @@ class NumpyEncoder(json.JSONEncoder):
             return obj.tolist()
         return super().default(obj)
 
-# Override FastAPI's JSON response encoder
+
+# Override FastAPI's JSON response encoder (fallback)
 def custom_json_encoder(obj):
     if isinstance(obj, np.integer):
         return int(obj)
@@ -48,11 +48,12 @@ def custom_json_encoder(obj):
         return obj.isoformat()
     elif isinstance(obj, Decimal):
         return float(obj)
-    elif hasattr(obj, 'item'):  # numpy scalars
+    elif hasattr(obj, 'item'):
         return obj.item()
-    elif hasattr(obj, 'tolist'):  # numpy arrays
+    elif hasattr(obj, 'tolist'):
         return obj.tolist()
     return jsonable_encoder(obj)
+
 
 # Import route modules
 from routes.health import router as health_router
@@ -65,11 +66,32 @@ from routes.geography import router as geography_router
 from routes.historyOrders import router as history_orders_router
 # from routes.reasoning import router as reasoning_router
 
+
 app = FastAPI(
     title="Order Analysis Workflow API",
     description="FastAPI server for processing order analysis queries",
     version="1.0.0"
 )
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Print startup banner once when the application starts."""
+    host = os.getenv('HOST', '0.0.0.0')
+    port = int(os.getenv('PORT', 5000))   # Changed default to 8000 (common for prod)
+
+    print(f"\n{'='*60}", flush=True)
+    print(f"🚀 Order Analysis Workflow Server (FastAPI + Gunicorn)", flush=True)
+    print(f"{'='*60}", flush=True)
+    print(f"📡 Server: http://{host}:{port}", flush=True)
+    print(f"❤️  Health: http://{host}:{port}/health", flush=True)
+    print(f"📝 Examples: http://{host}:{port}/examples", flush=True)
+    print(f"🧠 Plan: POST http://{host}:{port}/plan", flush=True)
+    print(f"🔍 Query: POST http://{host}:{port}/query", flush=True)
+    print(f"🧠 Reasoning: http://{host}:{port}/reasoning/", flush=True)
+    print(f"📖 Docs: http://{host}:{port}/docs", flush=True)
+    print(f"📋 ReDoc: http://{host}:{port}/redoc", flush=True)
+    print(f"{'='*60}\n", flush=True)
 
 
 @app.middleware("http")
@@ -83,7 +105,8 @@ async def request_id_middleware(request: Request, call_next):
     response.headers["X-Request-ID"] = request_id
     return response
 
-# Configure FastAPI to use custom JSON encoder for numpy/pandas types
+
+# Custom JSON Response class
 from fastapi.responses import JSONResponse
 import typing
 
@@ -98,10 +121,12 @@ class CustomJSONResponse(JSONResponse):
             separators=(",", ":"),
         ).encode("utf-8")
 
+
 # Set default response class
 app.default_response_class = CustomJSONResponse
 
-# Enable CORS for frontend access
+
+# Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -127,6 +152,7 @@ app.add_middleware(
     expose_headers=["*"]
 )
 
+
 # Include routers
 app.include_router(health_router)
 app.include_router(query_router)
@@ -137,30 +163,3 @@ app.include_router(cancellation_router)
 app.include_router(geography_router)
 app.include_router(history_orders_router)
 # app.include_router(reasoning_router)
-
-if __name__ == '__main__':
-    # Load environment variables
-    host = os.getenv('HOST', '0.0.0.0')
-    port = int(os.getenv('PORT', 5000))
-    print("api-key: ", os.getenv('OPENROUTER_API_KEY'))
-
-    print(f"\n{'='*60}", flush=True)
-    print(f"🚀 Order Analysis Workflow Server (FastAPI)", flush=True)
-    print(f"{'='*60}", flush=True)
-    print(f"📡 Server: http://{host}:{port}", flush=True)
-    print(f"❤️  Health: http://{host}:{port}/health", flush=True)
-    print(f"📝 Examples: http://{host}:{port}/examples", flush=True)
-    print(f"🧠 Plan: POST http://{host}:{port}/plan", flush=True)
-    print(f"🔍 Query: POST http://{host}:{port}/query", flush=True)
-    print(f"🧠 Reasoning: http://{host}:{port}/reasoning/", flush=True)
-    print(f"📖 Docs: http://{host}:{port}/docs", flush=True)
-    print(f"📋 ReDoc: http://{host}:{port}/redoc", flush=True)
-    print(f"{'='*60}\n", flush=True)
-    
-    uvicorn.run(
-        "app:app",
-        host=host,
-        port=port,
-        reload=True,
-        log_level="info"
-    )

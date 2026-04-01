@@ -1,0 +1,51 @@
+{
+  "success": true,
+  "query": "get profit margin for Sakura",
+  "plan": {
+    "summarized_query": "Profit margin for Sakura",
+    "query_type": "metric_analysis",
+    "steps": [
+      {
+        "id": "step1",
+        "tool": "get_vendor_cost_sheet",
+        "depends_on": [],
+        "save_as": "df_raw"
+      },
+      {
+        "id": "step2",
+        "tool": "apply_filters",
+        "params": {
+          "table": "{{df_raw}}",
+          "filters": [
+            {
+              "field": "Style Name",
+              "value": "Sakura"
+            }
+          ]
+        },
+        "depends_on": [
+          "step1"
+        ],
+        "save_as": "df_filtered"
+      },
+      {
+        "id": "step3",
+        "tool": "get_margin",
+        "params": {
+          "table": "{{df_filtered}}"
+        },
+        "depends_on": [
+          "step2"
+        ],
+        "save_as": "margin_result"
+      }
+    ],
+    "manipulation": {
+      "required": true,
+      "type": "filter"
+    },
+    "base_params": {},
+    "tool": "get_vendor_cost_sheet"
+  },
+  "is_comparison": false
+}

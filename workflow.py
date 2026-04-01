@@ -1,4 +1,4 @@
-from typing import TypedDict, Annotated, Literal, Callable, Any
+from typing import TypedDict, Annotated, Literal, Callable, Any, Optional, Union
 from langgraph.graph import StateGraph, END
 import operator
 import pandas as pd
@@ -7,12 +7,14 @@ import asyncio
 import uuid
 
 # Import tools and LLM providers
-from tools import TOOL_REGISTRY, apply_filters
-from llm_providers import planning_llm, filtering_llm, grouping_llm, insight_llm, custom_calculation_llm
+from tools import apply_filters, get_gross_profit, get_margin, get_markup, get_cost_price, get_selling_price, get_cost_to_price_ratio
+from tools import ORDERS_TOOL_REGISTRY, PROFIT_TOOL_REGISTRY
+from llm_providers import query_categorization_llm, planning_llm, filtering_llm, grouping_llm, insight_llm, custom_calculation_llm
 
 # State schema
 class AgentState(TypedDict):
     user_query: str
+    data_source: str | None
     summarized_query: str | None
     plan: dict | None
     tool_result_refs: dict[str, str]  # {save_as: cache_key} - references only
@@ -41,8 +43,10 @@ class AgentState(TypedDict):
     metrics_calculated: list[str] | None
 
 # Simple in-memory cache (use Redis for production)
-RESULT_CACHE = {}
+RESULT_CACHE: dict[str, Any] = {}
 
+# Default tool registry (orders by default). Will be switched after categorization.
+TOOL_REGISTRY = ORDERS_TOOL_REGISTRY
 
 async def emit_step_event(
     state: AgentState,
@@ -108,145 +112,255 @@ async def _cancelled_state(state: AgentState, step_key: str, summary: str) -> Ag
         "error": REQUEST_CANCELLED_ERROR,
     }
 
+
 def cache_result(data: dict | list, key: str) -> str:
     """Cache result and return reference key"""
     cache_key = f"{key}_{uuid.uuid4().hex[:8]}"
     RESULT_CACHE[cache_key] = data
     return cache_key
 
+
 def get_cached_result(key: str) -> dict | list:
     """Retrieve result from cache"""
     return RESULT_CACHE.get(key)
 
-def extract_schema_with_enums(data: dict | list, sample_size: int = 100) -> dict:
-    """Extract schema with categorical value examples for LLM understanding"""
-
+def extract_schema_with_enums(
+    data: Union[pd.DataFrame, dict, list], 
+    sample_size: int = 100,
+    exclude_columns: list = None
+) -> dict:
+    """
+    Extract schema with categorical enums for LLM understanding.
+    
+    Supports:
+    - pandas DataFrame
+    - dict (single record or metadata)
+    - list (list of dicts or simple list)
+    """
+    if exclude_columns is None:
+        exclude_columns = ['pickup_address']
+    
     # Handle pandas DataFrame
-    if hasattr(data, 'empty'):  # Check if it's a DataFrame-like object
-        if data.empty:
-            return {}
-        
-        # Convert DataFrame to schema format
-        sample = data.head(sample_size) if len(data) > sample_size else data
-        schema = {}
-        
-        for column in data.columns:
-            if column != 'pickup_address':
-                # Get unique values for categorical detection
-                unique_values = set()
+    if isinstance(data, pd.DataFrame):
+        return _extract_dataframe_schema(data, sample_size, exclude_columns)
+    
+    # Handle plain dict
+    elif isinstance(data, dict):
+        return _extract_dict_schema(data)
+    
+    # Handle list
+    elif isinstance(data, list):
+        return _extract_list_schema(data, sample_size)
+    
+    else:
+        return {"type": type(data).__name__, "note": "Unsupported input type"}
+
+
+def _extract_dataframe_schema(
+    df: pd.DataFrame, 
+    sample_size: int = 100,
+    exclude_columns: list = None
+) -> dict:
+    """Extract detailed schema from a pandas DataFrame"""
+    if df.empty:
+        return {"note": "DataFrame is empty"}
+    
+    sample = df.head(sample_size) if len(df) > sample_size else df
+    schema = {}
+    
+    for column in df.columns:
+        if column in exclude_columns:
+            continue
+            
+        # --- Unique values for categorical detection ---
+        unique_values: set = set()
+        try:
+            # Use value_counts for efficiency and accuracy
+            value_counts = df[column].value_counts(dropna=True)
+            # Take top unique values (limit for performance + prompt size)
+            for val in value_counts.index[:50]:
+                if pd.isna(val):
+                    continue
                 try:
-                    unique_vals = sample[column].dropna().unique()
-                    for val in unique_vals:
-                        if val is not None:
-                            # Handle complex data types (lists, dicts) that can't be hashed
-                            try:
-                                # Try to convert to string for simple types
-                                if isinstance(val, (list, dict, tuple)):
-                                    # For complex types, use JSON representation
-                                    unique_values.add(json.dumps(val, sort_keys=True, default=str))
-                                else:
-                                    unique_values.add(str(val))
-                            except (TypeError, ValueError):
-                                # Fallback for any other unhashable types
-                                unique_values.add(str(type(val).__name__))
-                except Exception as e:
-                    # If unique() fails, just skip this column's enum detection
-                    print(f"Warning: Could not extract unique values for column '{column}': {e}")
-                    unique_values = set()
-            
-            # Sample value for example
-            sample_value = None
-            if not sample[column].empty:
-                non_null_values = sample[column].dropna()
-                if len(non_null_values) > 0:
-                    sample_value = non_null_values.iloc[0]
-                    # Convert complex types to JSON for display
-                    if isinstance(sample_value, (list, dict, tuple)):
-                        try:
-                            sample_value = json.dumps(sample_value, default=str)
-                        except:
-                            sample_value = str(sample_value)
-            
-            # If a certain column field is [object Object]
-            value_type = type(sample_value).__name__ if sample_value is not None else "object"
-
-            # If few unique values (< 20), treat as categorical
-            is_categorical = len(unique_values) < 20 and len(unique_values) > 0
-
-            schema[column] = {
-                "type": value_type,
-                "example": sample_value,
-                "is_categorical": is_categorical,
-                "enum": sorted(list(unique_values)) if is_categorical else None
-            }
+                    if isinstance(val, (list, dict, tuple)):
+                        unique_values.add(json.dumps(val, sort_keys=True, default=str))
+                    else:
+                        unique_values.add(str(val))
+                except (TypeError, ValueError):
+                    unique_values.add(f"<unhashable_{type(val).__name__}>")
+        except Exception as e:
+            print(f"Warning: Could not extract uniques for '{column}': {e}")
         
-        return schema
-    
-    # Handle empty data
-    if not data:
-        return {}
-    
-    # Handle scalar values (int, float, numpy scalars)
-    if isinstance(data, (int, float)) or hasattr(data, 'dtype'):
-        # Single scalar value - create a simple schema
-        return {
-            "value": {
-                "type": type(data).__name__,
-                "example": float(data) if hasattr(data, 'dtype') else data,
-                "is_categorical": False,
-                "enum": None
-            }
+        # --- Sample value ---
+        sample_value = None
+        non_null = df[column].dropna()
+        if len(non_null) > 0:
+            raw_value = non_null.iloc[0]
+            if isinstance(raw_value, (list, dict, tuple)):
+                try:
+                    sample_value = json.dumps(raw_value, default=str)
+                except:
+                    sample_value = str(raw_value)
+            else:
+                sample_value = raw_value
+        
+        # Determine basic type
+        value_type = type(sample_value).__name__ if sample_value is not None else "object"
+        
+        # Categorical detection: few unique values
+        is_categorical = 0 < len(unique_values) <= 20
+        
+        schema[column] = {
+            "type": value_type,
+            "example": sample_value,
+            "is_categorical": is_categorical,
+            "enum": sorted(list(unique_values)) if is_categorical else None,
+            "unique_count": len(unique_values) if is_categorical else None
         }
     
-    # Handle list of records
-    if isinstance(data, list):
-        if len(data) == 0:
-            return {}
-        
-        # Sample records to find all unique categorical values
-        sample = data[:sample_size] if len(data) > sample_size else data
-        schema = {}
-        
-        # Build schema from first record
-        first_record = data[0]
-        for key, value in first_record.items():
-            value_type = type(value).__name__
+    return schema
+
+
+def _extract_dict_schema(data: dict) -> dict:
+    """Handle single dictionary (one record)"""
+    schema = {}
+    for key, value in data.items():
+        if isinstance(value, (list, dict, tuple)):
+            try:
+                example = json.dumps(value, default=str)
+            except:
+                example = str(value)
+        else:
+            example = value
             
-            # Collect unique values for categorical detection
-            unique_values = set()
-            for record in sample:
-                if key in record and record[key] is not None:
-                    unique_values.add(str(record[key]))
-            
-            # If few unique values (< 20), treat as categorical
-            is_categorical = len(unique_values) < 20 and len(unique_values) > 0
-            
-            schema[key] = {
-                "type": value_type,
-                "example": value,
-                "is_categorical": is_categorical,
-                "enum": sorted(list(unique_values)) if is_categorical else None
-            }
-        
-        return schema
+        schema[key] = {
+            "type": type(value).__name__,
+            "example": example,
+            "is_categorical": False,
+            "enum": None
+        }
+    return schema
+
+
+def _extract_list_schema(data: list, sample_size: int = 100) -> dict:
+    """Handle list input"""
+    if not data:
+        return {"type": "list", "length": 0, "note": "Empty list"}
     
-    # Handle single dict
-    else:
-        schema = {}
-        for key, value in data.items():
-            schema[key] = {
-                "type": type(value).__name__,
-                "example": value,
-                "is_categorical": False,
-                "enum": None
+    # If list of dictionaries → convert to DataFrame for consistent schema
+    if isinstance(data[0], dict):
+        try:
+            df = pd.DataFrame(data[:sample_size])
+            return _extract_dataframe_schema(df, sample_size=sample_size)
+        except Exception as e:
+            return {
+                "type": "list[dict]",
+                "length": len(data),
+                "error": str(e),
+                "sample": data[:3]
             }
-        return schema
+    
+    # Simple list (strings, numbers, etc.)
+    else:
+        unique_values = set()
+        try:
+            for item in data[:sample_size]:
+                unique_values.add(str(item))
+        except:
+            pass
+            
+        is_categorical = len(unique_values) <= 20
+        
+        return {
+            "type": "list",
+            "length": len(data),
+            "is_categorical": is_categorical,
+            "enum": sorted(list(unique_values)) if is_categorical else None,
+            "sample": data[:5]
+        }
+
 
 # Node functions
+async def query_categorization_node(state: AgentState) -> AgentState:
+
+    """QueryCategorizationLLM() categorizes user_query into data_sources"""
+    if _is_request_cancelled(state):
+        return await _cancelled_state(state, "CATEGORIZING_CANCELLED", "Categorization skipped due to cancellation")
+
+    await emit_step_event(
+        state,
+        "CATEGORIZING_START",
+        "Choosing data source...",
+        status="START",
+        details=f"Query: {state['user_query'][:120]}",
+    )
+
+    print(f"🧠 [CATEGORIZING] Query: '{state['user_query'][:60]}...' | Error: {state.get('error', 'None')}", flush=True)
+
+    try:
+        await gate_next_step(state, "Choosing a data source...", wait_ms=500)
+
+        query_categorization_response = query_categorization_llm.invoke(state["user_query"])
+
+        print("llm response: ", query_categorization_response, flush=True)
+        data_source = query_categorization_response.get('data_source')
+
+        if not query_categorization_response.get("success"):
+            return {
+                **state,
+                "error": "Categorization failed: " + query_categorization_response.get("error", "Unknown error")
+            }
+
+        # Set global TOOL_REGISTRY based on chosen data source
+        try:
+            global TOOL_REGISTRY
+            if data_source == "order":
+                TOOL_REGISTRY = ORDERS_TOOL_REGISTRY
+            elif data_source == "profit":
+                TOOL_REGISTRY = PROFIT_TOOL_REGISTRY
+        except Exception:
+            # Fallback to orders registry in case of any issue
+            TOOL_REGISTRY = ORDERS_TOOL_REGISTRY
+
+        await emit_step_event(
+            state,
+            "CATEGORIZING_COMPLETE",
+            f"Data source chosen: {data_source} query",
+            status="COMPLETE",
+        )
+
+        print(f"✅ [CATEGORIZING] Data source: {data_source}", flush=True)
+
+        return {
+            **state,
+            "data_source": data_source,
+            "current_step_index": 0,
+            "error": None
+        }
+    
+    except Exception as e:
+        await emit_step_event(
+            state,
+            "CATEGORIZING_ERROR",
+            "Categorizing failed",
+            status="ERROR",
+            details=str(e),
+        )
+        
+        print(f"❌ [CATEGORIZING] Error: {str(e)}", flush=True)
+        return {**state, "error": f"Categorizing error: {str(e)}"}
+
+
 async def planning_node(state: AgentState) -> AgentState:
     """Planning LLM generates execution plan"""
     if _is_request_cancelled(state):
         return await _cancelled_state(state, "PLANNING_CANCELLED", "Planning skipped due to cancellation")
+
+    # Early exit if previous step had error
+    if state.get("error"):
+        # print("state: ", state, flush=True)
+        print(f"⏭️ [PLANNING] Skipped due to previous error", flush=True)
+        return state
 
     await emit_step_event(
         state,
@@ -257,10 +371,19 @@ async def planning_node(state: AgentState) -> AgentState:
     )
     
     print(f"🧠 [PLANNING] Query: '{state['user_query'][:60]}...' | Error: {state.get('error', 'None')}", flush=True)
+
     try:
         await gate_next_step(state, "Generating a plan...", wait_ms=500)
-        # Call your planning LLM here
-        plan_response = planning_llm.invoke(state["user_query"])
+
+        data_source = state.get("data_source")
+        
+        print(f"data_source in workflow planning_node: ", data_source, flush=True)
+
+        # Now call invoke with clean string
+        plan_response = planning_llm.invoke(
+            query=state["user_query"], 
+            data_source=state["data_source"]          # ← Now correctly passing string "order" or "profit"
+        )
         
         if not plan_response.get("success"):
             return {
@@ -271,11 +394,11 @@ async def planning_node(state: AgentState) -> AgentState:
         await emit_step_event(
             state,
             "PLANNING_COMPLETE",
-            f"Plan created: {plan_response['plan'].get('query_type', 'unknown')} query",
+            f"Plan created: {plan_response.get('plan', {}).get('query_type', 'unknown')} query",
             status="COMPLETE",
         )
         
-        print(f"✅ [PLANNING] Plan created: {plan_response['plan'].get('query_type', 'unknown')} query", flush=True)
+        print(f"✅ [PLANNING] Plan created for {data_source} query", flush=True)
         
         return {
             **state,
@@ -296,6 +419,7 @@ async def planning_node(state: AgentState) -> AgentState:
         
         print(f"❌ [PLANNING] Error: {str(e)}", flush=True)
         return {**state, "error": f"Planning error: {str(e)}"}
+
 
 async def execute_tool_node(state: AgentState) -> AgentState:
     """Execute the current step's tool
@@ -327,7 +451,7 @@ async def execute_tool_node(state: AgentState) -> AgentState:
     
     print(f"🔧 [EXECUTE_TOOL] Step {step_idx + 1}/{total_steps} | Retry: {state.get('retry_count', 0)}", flush=True)
 
-    #print(state, flush=True)
+   
 
     try:
         plan = state["plan"]
@@ -443,6 +567,7 @@ async def execute_tool_node(state: AgentState) -> AgentState:
         print(f"❌ [EXECUTE_TOOL] Error: {str(e)}", flush=True)
         return {**state, "error": f"Tool execution failed: {str(e)}"}
     
+
 async def filtering_node(state: AgentState) -> AgentState:
     """Filtering LLM generates filter parameters using schema with categorical values"""
     print(f"🔍 [FILTERING] Extracting filters from query", flush=True)
@@ -496,6 +621,7 @@ async def filtering_node(state: AgentState) -> AgentState:
         )
         print(f"❌ [FILTERING] Error: {str(e)}", flush=True)
         return {**state, "error": f"Filtering error: {str(e)}"}
+
 
 def apply_filters_node(state: AgentState) -> AgentState:
     """Apply filters to the result"""
@@ -577,13 +703,10 @@ def metric_processing_node(state: AgentState) -> AgentState:
         metric_tools = [
             step for step in plan["steps"]
             if (
-                (step["tool"].startswith("get_") and step["tool"] not in ["get_all_orders", "get_schema_info"])
+                (step["tool"].startswith("get_") and step["tool"] not in ["get_all_orders", "get_schema_info", "get_vendor_cost_sheet"])
                 or step["tool"] == "execute_custom_calculation"
             )
         ]
-        
-        # print("state[tool_result_refs]: ", state["tool_result_refs"])
-        # print("metric_tools: ", metric_tools)
 
         for metric_step in metric_tools:
             tool_name = metric_step["tool"]
@@ -609,7 +732,7 @@ def metric_processing_node(state: AgentState) -> AgentState:
         # print(state['plan'], flush=True)
 
         # If no specific metrics in plan, calculate common metrics
-        if not metric_results:
+        if not metric_results and (state.get("data_source") == "order"):
             # Use the common metrics tool
             metric_results = TOOL_REGISTRY["get_common_metrics"](result_data)
         
@@ -620,8 +743,8 @@ def metric_processing_node(state: AgentState) -> AgentState:
             metrics_calculated = list(metric_results.keys()) if isinstance(metric_results, dict) else []
             print(f"✅ [METRIC_PROCESSING] Calculated {len(metric_results)} metrics", flush=True)
             
-            # print("metric_results: ", metric_results)
-            # print("metric_ref: ", metric_ref)
+            print("metric_results: ", metric_results, flush=True)
+            print("metric_ref: ", metric_ref, flush=True)
 
             return {
                 **state,
@@ -765,10 +888,14 @@ async def grouping_node(state: AgentState) -> AgentState:
         )
 
         await gate_next_step(state, "Grouping data...", wait_ms=500)
-        # Call grouping LLM to extract comparison dimensions
+        
+        # IMPORTANT: Pass data_source to the grouping LLM so it uses the correct schema!
+        # Without this, grouping_llm defaults to "order" mode and ignores profit schema
+        # This causes it to group by non-existent fields like "product_name" for profit queries
         grouping_response = grouping_llm.invoke({
             "query": state["user_query"],
-            "plan": state["plan"]
+            "plan": state["plan"],
+            "data_source": state.get("data_source", "order")  # ← CRITICAL: Pass the data source (profit or order)
         })
         
         groups = grouping_response.get("groups", [])
@@ -810,6 +937,7 @@ async def grouping_node(state: AgentState) -> AgentState:
         )
         print(f"❌ [GROUPING] Error: {str(e)}", flush=True)
         return {**state, "error": f"Grouping error: {str(e)}"}
+
 
 async def parallel_fetch_node(state: AgentState) -> AgentState:
     """Execute data fetches for current comparison group"""
@@ -899,86 +1027,170 @@ async def parallel_fetch_node(state: AgentState) -> AgentState:
         print(f"❌ [PARALLEL_FETCH] Error: {str(e)}", flush=True)
         return {**state, "error": f"Parallel fetch error: {str(e)}"}
 
+#COMPARISON - adding conditional if data_source === "order" OR "profit"
 def aggregation_node(state: AgentState) -> AgentState:
     """Compute metrics for each comparison group"""
     if _is_request_cancelled(state):
         return {**state, "error": REQUEST_CANCELLED_ERROR}
 
+    data_source = state.get("data_source")
     num_groups = len(state.get("group_results", {}))
     print(f"📈 [AGGREGATION] Computing metrics for {num_groups} group(s)", flush=True)
-    
-    try:
-        aggregated_metrics = {}
-        
-        for group_id, result_ref in state["group_results"].items():
-            data = get_cached_result(result_ref)
+
+    if data_source == "order":
+        try:
+            aggregated_metrics = {}
             
-            # Helper function to safely convert to float
-            def safe_float(value, default=0.0):
-                """Convert value to float, handling strings and None"""
-                try:
-                    if value is None or value == "":
+            for group_id, result_ref in state["group_results"].items():
+                data = get_cached_result(result_ref)
+                
+                # Helper function to safely convert to float
+                def safe_float(value, default=0.0):
+                    """Convert value to float, handling strings and None"""
+                    try:
+                        if value is None or value == "":
+                            return default
+                        return float(value)
+                    except (ValueError, TypeError):
                         return default
-                    return float(value)
-                except (ValueError, TypeError):
-                    return default
+                
+                # Calculate metrics with type safety
+                total_revenue = 0.0
+                if isinstance(data, list):
+                    for record in data:
+                        total_revenue += safe_float(record.get("total_amount", 0))
+                else:
+                    total_revenue = safe_float(data.get("total_amount", 0))
+                
+                metrics = {
+                    "count": len(data) if isinstance(data, list) else 1,
+                    "total_revenue": total_revenue,
+                    "avg_order_value": 0,
+                    "payment_mode_distribution": {},
+                    "order_status_distribution": {},
+                    "top_cities": {},
+                    "top_states": {}
+                }
+                
+                if metrics["count"] > 0:
+                    metrics["avg_order_value"] = metrics["total_revenue"] / metrics["count"]
+                
+                # Distribution calculations
+                if isinstance(data, list):
+                    for record in data:
+                        # Payment mode
+                        pm = record.get("payment_mode", "Unknown")
+                        metrics["payment_mode_distribution"][pm] = metrics["payment_mode_distribution"].get(pm, 0) + 1
+                        
+                        # Order status
+                        status = record.get("order_status", "Unknown")
+                        metrics["order_status_distribution"][status] = metrics["order_status_distribution"].get(status, 0) + 1
+                        
+                        # Cities
+                        city = record.get("city", "Unknown")
+                        metrics["top_cities"][city] = metrics["top_cities"].get(city, 0) + 1
+                        
+                        # States
+                        billing_state = record.get("billing_state", "Unknown")
+                        metrics["top_states"][billing_state] = metrics["top_states"].get(billing_state, 0) + 1
+                
+                aggregated_metrics[group_id] = metrics
             
-            # Calculate metrics with type safety
-            total_revenue = 0.0
-            if isinstance(data, list):
+            print(f"✅ [AGGREGATION] Metrics computed for: {list(aggregated_metrics.keys())}", flush=True)
+            
+            return {
+                **state,
+                "aggregated_metrics": aggregated_metrics,
+                "error": None
+            }    
+        except Exception as e:
+            print(f"❌ [AGGREGATION] Error: {str(e)}", flush=True)
+            return {**state, "error": f"Aggregation error: {str(e)}"}
+    
+    elif data_source == "profit":
+        try:
+            aggregated_metrics = {}
+            
+            for group_id, result_ref in state["group_results"].items():
+                data = get_cached_result(result_ref)
+                
+                # Ensure data is always a list for uniform processing
+                if not isinstance(data, list):
+                    data = [data] if data else []
+                
+                # Helper to safely get numeric value from record
+                def safe_float(value, default=0.0):
+                    try:
+                        if value is None or value == "" or value == "None":
+                            return default
+                        return float(value)
+                    except (ValueError, TypeError):
+                        return default
+                
+                group_metrics = []
+                
                 for record in data:
-                    total_revenue += safe_float(record.get("total_amount", 0))
-            else:
-                total_revenue = safe_float(data.get("total_amount", 0))
+                    # Convert record to dict if it's a tuple/row from DB
+                    if not isinstance(record, dict):
+                        try:
+                            record = dict(record)  # for psycopg2 RealDictRow or similar
+                        except (TypeError, ValueError):
+                            record = {}
+                    
+                    # Calculate all profit metrics using your imported tools
+                    # IMPORTANT: Wrap record in a list when passing to tools!
+                    # Tools like get_cost_price() expect Union[pd.DataFrame, list], not a single dict
+                    # Passing a dict causes: "'dict' object has no attribute 'columns'"
+                    metrics = {
+                        "style_name": record.get("Style Name") or record.get("style_name"),
+                        "collection_name": record.get("Collection Name") or record.get("collection_name"),
+                        "brand": record.get("BRAND") or record.get("brand"),
+                        "gender": record.get("Gender") or record.get("gender"),
+                        "factory": record.get("FACTORY") or record.get("factory"),
+                        "cost_price": get_cost_price([record]),  # ← Wrap in list!
+                        "selling_price": get_selling_price([record]),  # ← Wrap in list!
+                        "gross_profit": get_gross_profit([record]),  # ← Wrap in list!
+                        "gross_margin": get_margin([record]),           # in % | Wrap in list!
+                        "markup": get_markup([record]),                 # as ratio | Wrap in list!
+                        "markup_percent": round(get_markup([record]) * 100, 2) if get_markup([record]) is not None else None,  # Wrap in list!
+                        "cost_to_price_ratio": get_cost_to_price_ratio([record]),  # in % | Wrap in list!
+                    }
+                    
+                    # Add raw columns for transparency
+                    metrics["final_price_raw"] = safe_float(record.get("Final price"))
+                    metrics["price_1_raw"] = safe_float(record.get("PRICE_1"))
+                    metrics["mrp_raw"] = safe_float(record.get("MRP"))
+                    
+                    group_metrics.append(metrics)
+                
+                aggregated_metrics[group_id] = {
+                    "items": group_metrics,
+                    "count": len(group_metrics),
+                    "summary": {
+                        "avg_gross_margin": round(sum(m["gross_margin"] for m in group_metrics if m["gross_margin"] is not None) / len([m for m in group_metrics if m["gross_margin"] is not None]) or 0, 2),
+                        "avg_markup_percent": round(sum(m["markup_percent"] for m in group_metrics if m["markup_percent"] is not None) / len([m for m in group_metrics if m["markup_percent"] is not None]) or 0, 2),
+                        "total_gross_profit": round(sum(m["gross_profit"] for m in group_metrics if m["gross_profit"] is not None), 2),
+                    }
+                }
             
-            metrics = {
-                "count": len(data) if isinstance(data, list) else 1,
-                "total_revenue": total_revenue,
-                "avg_order_value": 0,
-                "payment_mode_distribution": {},
-                "order_status_distribution": {},
-                "top_cities": {},
-                "top_states": {}
+            print(f"✅ [AGGREGATION] Profit metrics computed for: {list(aggregated_metrics.keys())}", flush=True)
+            
+            return {
+                **state,
+                "aggregated_metrics": aggregated_metrics,
+                "error": None
             }
             
-            if metrics["count"] > 0:
-                metrics["avg_order_value"] = metrics["total_revenue"] / metrics["count"]
-            
-            # Distribution calculations
-            if isinstance(data, list):
-                for record in data:
-                    # Payment mode
-                    pm = record.get("payment_mode", "Unknown")
-                    metrics["payment_mode_distribution"][pm] = metrics["payment_mode_distribution"].get(pm, 0) + 1
-                    
-                    # Order status
-                    status = record.get("order_status", "Unknown")
-                    metrics["order_status_distribution"][status] = metrics["order_status_distribution"].get(status, 0) + 1
-                    
-                    # Cities
-                    city = record.get("city", "Unknown")
-                    metrics["top_cities"][city] = metrics["top_cities"].get(city, 0) + 1
-                    
-                    # States
-                    billing_state = record.get("billing_state", "Unknown")
-                    metrics["top_states"][billing_state] = metrics["top_states"].get(billing_state, 0) + 1
-            
-            aggregated_metrics[group_id] = metrics
-        
-        print(f"✅ [AGGREGATION] Metrics computed for: {list(aggregated_metrics.keys())}", flush=True)
-        
-        return {
-            **state,
-            "aggregated_metrics": aggregated_metrics,
-            "error": None
-        }
-        
-    except Exception as e:
-        print(f"❌ [AGGREGATION] Error: {str(e)}", flush=True)
-        return {**state, "error": f"Aggregation error: {str(e)}"}
+        except Exception as e:
+            print(f"❌ [AGGREGATION] Profit Error: {str(e)}", flush=True)
+            return {**state, "error": f"Profit aggregation error: {str(e)}"}
+    
+    else:
+        # Fallback for unknown data_source
+        return {**state, "error": f"Unsupported data_source: {data_source}"}
 
 def comparison_node(state: AgentState) -> AgentState:
-    """Perform comparison logic between groups"""
+    """Perform comparison logic between groups - supports both order and profit data"""
     if _is_request_cancelled(state):
         return {**state, "error": REQUEST_CANCELLED_ERROR}
 
@@ -995,104 +1207,232 @@ def comparison_node(state: AgentState) -> AgentState:
         if num_groups < 2:
             return {**state, "error": "Need at least 2 groups for comparison"}
         
-        # Two-group pairwise comparison
-        if num_groups == 2:
-            group_a, group_b = group_ids[0], group_ids[1]
-            metrics_a = metrics[group_a]
-            metrics_b = metrics[group_b]
-            
-            comparison_results = {
-                "comparison_type": "pairwise",
-                "comparison_mode": True,
-                "comparison_param": state.get("comparison_param"),
-                "groups": {"a": group_a, "b": group_b},
-                "order_count": {
-                    "a": metrics_a["count"],
-                    "b": metrics_b["count"],
-                    "diff": metrics_b["count"] - metrics_a["count"],
-                    "diff_pct": ((metrics_b["count"] - metrics_a["count"]) / metrics_a["count"] * 100) if metrics_a["count"] > 0 else 0
-                },
-                "total_revenue": {
-                    "a": metrics_a["total_revenue"],
-                    "b": metrics_b["total_revenue"],
-                    "diff": metrics_b["total_revenue"] - metrics_a["total_revenue"],
-                    "diff_pct": ((metrics_b["total_revenue"] - metrics_a["total_revenue"]) / metrics_a["total_revenue"] * 100) if metrics_a["total_revenue"] > 0 else 0
-                },
-                "avg_order_value": {
-                    "a": metrics_a["avg_order_value"],
-                    "b": metrics_b["avg_order_value"],
-                    "diff": metrics_b["avg_order_value"] - metrics_a["avg_order_value"],
-                    "diff_pct": ((metrics_b["avg_order_value"] - metrics_a["avg_order_value"]) / metrics_a["avg_order_value"] * 100) if metrics_a["avg_order_value"] > 0 else 0
-                },
-                "winner_by_volume": group_a if metrics_a["count"] > metrics_b["count"] else group_b,
-                "winner_by_revenue": group_a if metrics_a["total_revenue"] > metrics_b["total_revenue"] else group_b,
-                "winner_by_avg_value": group_a if metrics_a["avg_order_value"] > metrics_b["avg_order_value"] else group_b
-            }
-            
-            print(f"✅ [COMPARISON] {group_a} vs {group_b} | Winner by volume: {comparison_results['winner_by_volume']}", flush=True)
+        data_source = state.get("data_source")
         
-        # Multi-group comparison (N > 2)
-        else:
-            # Use first group as baseline for comparison
-            baseline_id = group_ids[0]
-            baseline_metrics = metrics[baseline_id]
-            
-            # Build comparison summary for all groups
-            group_summaries = {}
-            for group_id in group_ids:
-                group_metrics = metrics[group_id]
-                group_summaries[group_id] = {
-                    "order_count": group_metrics["count"],
-                    "total_revenue": group_metrics["total_revenue"],
-                    "avg_order_value": group_metrics["avg_order_value"],
-                    "payment_mode_distribution": group_metrics["payment_mode_distribution"],
-                    "order_status_distribution": group_metrics["order_status_distribution"],
-                    "top_cities": group_metrics["top_cities"],
-                    "top_states": group_metrics["top_states"]
-                }
-            
-            # Compare each group to baseline
-            comparisons_to_baseline = {}
-            for group_id in group_ids[1:]:  # Skip baseline itself
-                group_metrics = metrics[group_id]
-                comparisons_to_baseline[group_id] = {
-                    "order_count_diff": group_metrics["count"] - baseline_metrics["count"],
-                    "order_count_diff_pct": ((group_metrics["count"] - baseline_metrics["count"]) / baseline_metrics["count"] * 100) if baseline_metrics["count"] > 0 else 0,
-                    "revenue_diff": group_metrics["total_revenue"] - baseline_metrics["total_revenue"],
-                    "revenue_diff_pct": ((group_metrics["total_revenue"] - baseline_metrics["total_revenue"]) / baseline_metrics["total_revenue"] * 100) if baseline_metrics["total_revenue"] > 0 else 0,
-                    "avg_order_value_diff": group_metrics["avg_order_value"] - baseline_metrics["avg_order_value"],
-                    "avg_order_value_diff_pct": ((group_metrics["avg_order_value"] - baseline_metrics["avg_order_value"]) / baseline_metrics["avg_order_value"] * 100) if baseline_metrics["avg_order_value"] > 0 else 0
-                }
-            
-            # Identify overall winners across all groups
-            winner_by_volume = max(group_ids, key=lambda gid: metrics[gid]["count"])
-            winner_by_revenue = max(group_ids, key=lambda gid: metrics[gid]["total_revenue"])
-            winner_by_avg_value = max(group_ids, key=lambda gid: metrics[gid]["avg_order_value"])
-            
+        # ====================== PROFIT COMPARISON ======================
+        if data_source == "profit":
             comparison_results = {
-                "comparison_type": "multi_group",
+                "comparison_type": "pairwise" if num_groups == 2 else "multi_group",
                 "comparison_mode": True,
                 "comparison_param": state.get("comparison_param"),
+                "data_source": "profit",
                 "num_groups": num_groups,
                 "groups": group_ids,
-                "baseline": baseline_id,
-                "group_summaries": group_summaries,
-                "comparisons_to_baseline": comparisons_to_baseline,
-                "overall_winners": {
-                    "by_volume": winner_by_volume,
-                    "by_revenue": winner_by_revenue,
-                    "by_avg_value": winner_by_avg_value
-                }
             }
             
-            print(f"✅ [COMPARISON] {num_groups} groups compared | Winner by volume: {winner_by_volume}, by revenue: {winner_by_revenue}", flush=True)
+            if num_groups == 2:
+                # Pairwise comparison (most common for styles)
+                group_a, group_b = group_ids[0], group_ids[1]
+                metrics_a = metrics[group_a]
+                metrics_b = metrics[group_b]
+                
+                # Extract summary for easier access
+                summary_a = metrics_a.get("summary", {})
+                summary_b = metrics_b.get("summary", {})
+                
+                comparison_results.update({
+                    "groups": {"a": group_a, "b": group_b},
+                    "item_count": {
+                        "a": metrics_a.get("count", 0),
+                        "b": metrics_b.get("count", 0),
+                        "diff": metrics_b.get("count", 0) - metrics_a.get("count", 0),
+                        "diff_pct": round(((metrics_b.get("count", 0) - metrics_a.get("count", 0)) / metrics_a.get("count", 1) * 100), 2) 
+                                   if metrics_a.get("count", 0) > 0 else 0
+                    },
+                    "avg_gross_margin": {
+                        "a": summary_a.get("avg_gross_margin", 0),
+                        "b": summary_b.get("avg_gross_margin", 0),
+                        "diff": round(summary_b.get("avg_gross_margin", 0) - summary_a.get("avg_gross_margin", 0), 2),
+                        "diff_pct": round(((summary_b.get("avg_gross_margin", 0) - summary_a.get("avg_gross_margin", 0)) / 
+                                         summary_a.get("avg_gross_margin", 1) * 100), 2) if summary_a.get("avg_gross_margin", 0) > 0 else 0
+                    },
+                    "avg_markup_percent": {
+                        "a": summary_a.get("avg_markup_percent", 0),
+                        "b": summary_b.get("avg_markup_percent", 0),
+                        "diff": round(summary_b.get("avg_markup_percent", 0) - summary_a.get("avg_markup_percent", 0), 2),
+                        "diff_pct": round(((summary_b.get("avg_markup_percent", 0) - summary_a.get("avg_markup_percent", 0)) / 
+                                         summary_a.get("avg_markup_percent", 1) * 100), 2) if summary_a.get("avg_markup_percent", 0) > 0 else 0
+                    },
+                    "total_gross_profit": {
+                        "a": summary_a.get("total_gross_profit", 0),
+                        "b": summary_b.get("total_gross_profit", 0),
+                        "diff": round(summary_b.get("total_gross_profit", 0) - summary_a.get("total_gross_profit", 0), 2),
+                        "diff_pct": round(((summary_b.get("total_gross_profit", 0) - summary_a.get("total_gross_profit", 0)) / 
+                                         summary_a.get("total_gross_profit", 1) * 100), 2) if summary_a.get("total_gross_profit", 0) > 0 else 0
+                    },
+                    "winner_by_margin": group_a if summary_a.get("avg_gross_margin", 0) > summary_b.get("avg_gross_margin", 0) else group_b,
+                    "winner_by_total_profit": group_a if summary_a.get("total_gross_profit", 0) > summary_b.get("total_gross_profit", 0) else group_b,
+                    "winner_by_markup": group_a if summary_a.get("avg_markup_percent", 0) > summary_b.get("avg_markup_percent", 0) else group_b,
+                })
+                
+                print(f"✅ [COMPARISON] Profit: {group_a} vs {group_b} | "
+                      f"Margin Winner: {comparison_results['winner_by_margin']}", flush=True)
+            else:
+                # Multi-group comparison for profit
+                baseline_id = group_ids[0]
+                baseline_summary = metrics[baseline_id].get("summary", {})
+                
+                group_summaries = {}
+                comparisons_to_baseline = {}
+                
+                for group_id in group_ids:
+                    group_summary = metrics[group_id].get("summary", {})
+                    group_summaries[group_id] = {
+                        "count": metrics[group_id].get("count", 0),
+                        "avg_gross_margin": group_summary.get("avg_gross_margin", 0),
+                        "avg_markup_percent": group_summary.get("avg_markup_percent", 0),
+                        "total_gross_profit": group_summary.get("total_gross_profit", 0),
+                    }
+                
+                for group_id in group_ids[1:]:
+                    group_summary = metrics[group_id].get("summary", {})
+                    comparisons_to_baseline[group_id] = {
+                        "margin_diff": round(group_summary.get("avg_gross_margin", 0) - baseline_summary.get("avg_gross_margin", 0), 2),
+                        "margin_diff_pct": round(((group_summary.get("avg_gross_margin", 0) - baseline_summary.get("avg_gross_margin", 0)) / 
+                                                baseline_summary.get("avg_gross_margin", 1) * 100), 2) 
+                                           if baseline_summary.get("avg_gross_margin", 0) > 0 else 0,
+                        "total_profit_diff": round(group_summary.get("total_gross_profit", 0) - baseline_summary.get("total_gross_profit", 0), 2),
+                        "total_profit_diff_pct": round(((group_summary.get("total_gross_profit", 0) - baseline_summary.get("total_gross_profit", 0)) / 
+                                                      baseline_summary.get("total_gross_profit", 1) * 100), 2) 
+                                                if baseline_summary.get("total_gross_profit", 0) > 0 else 0,
+                    }
+                
+                # Overall winners
+                winner_by_margin = max(group_ids, key=lambda gid: metrics[gid].get("summary", {}).get("avg_gross_margin", 0))
+                winner_by_profit = max(group_ids, key=lambda gid: metrics[gid].get("summary", {}).get("total_gross_profit", 0))
+                winner_by_markup = max(group_ids, key=lambda gid: metrics[gid].get("summary", {}).get("avg_markup_percent", 0))
+                
+                comparison_results.update({
+                    "baseline": baseline_id,
+                    "group_summaries": group_summaries,
+                    "comparisons_to_baseline": comparisons_to_baseline,
+                    "overall_winners": {
+                        "by_margin": winner_by_margin,
+                        "by_total_profit": winner_by_profit,
+                        "by_markup": winner_by_markup
+                    }
+                })
+                
+                print(f"✅ [COMPARISON] Profit: {num_groups} groups compared | "
+                      f"Best Margin: {winner_by_margin}", flush=True)
+            
+            # Return profit comparison results
+            return {
+                **state,
+                "comparison_results": comparison_results,
+                "error": None
+            }
         
-        return {
-            **state,
-            "comparison_results": comparison_results,
-            "error": None
-        }
-        
+        # ====================== ORDER COMPARISON ======================
+        elif data_source == "order":
+            metrics = state.get("aggregated_metrics")
+            if not metrics:
+                return {**state, "error": "No aggregated metrics available for comparison"}
+            
+            group_ids = list(metrics.keys())
+            num_groups = len(group_ids)
+            
+            if num_groups < 2:
+                return {**state, "error": "Need at least 2 groups for comparison"}
+            
+            # Two-group pairwise comparison
+            if num_groups == 2:
+                group_a, group_b = group_ids[0], group_ids[1]
+                metrics_a = metrics[group_a]
+                metrics_b = metrics[group_b]
+                
+                comparison_results = {
+                    "comparison_type": "pairwise",
+                    "comparison_mode": True,
+                    "comparison_param": state.get("comparison_param"),
+                    "groups": {"a": group_a, "b": group_b},
+                    "order_count": {
+                        "a": metrics_a["count"],
+                        "b": metrics_b["count"],
+                        "diff": metrics_b["count"] - metrics_a["count"],
+                        "diff_pct": ((metrics_b["count"] - metrics_a["count"]) / metrics_a["count"] * 100) if metrics_a["count"] > 0 else 0
+                    },
+                    "total_revenue": {
+                        "a": metrics_a["total_revenue"],
+                        "b": metrics_b["total_revenue"],
+                        "diff": metrics_b["total_revenue"] - metrics_a["total_revenue"],
+                        "diff_pct": ((metrics_b["total_revenue"] - metrics_a["total_revenue"]) / metrics_a["total_revenue"] * 100) if metrics_a["total_revenue"] > 0 else 0
+                    },
+                    "avg_order_value": {
+                        "a": metrics_a["avg_order_value"],
+                        "b": metrics_b["avg_order_value"],
+                        "diff": metrics_b["avg_order_value"] - metrics_a["avg_order_value"],
+                        "diff_pct": ((metrics_b["avg_order_value"] - metrics_a["avg_order_value"]) / metrics_a["avg_order_value"] * 100) if metrics_a["avg_order_value"] > 0 else 0
+                    },
+                    "winner_by_volume": group_a if metrics_a["count"] > metrics_b["count"] else group_b,
+                    "winner_by_revenue": group_a if metrics_a["total_revenue"] > metrics_b["total_revenue"] else group_b,
+                    "winner_by_avg_value": group_a if metrics_a["avg_order_value"] > metrics_b["avg_order_value"] else group_b
+                }
+                
+                print(f"✅ [COMPARISON] {group_a} vs {group_b} | Winner by volume: {comparison_results['winner_by_volume']}", flush=True)
+            
+            # Multi-group comparison (N > 2)
+            else:
+                # Use first group as baseline for comparison
+                baseline_id = group_ids[0]
+                baseline_metrics = metrics[baseline_id]
+                
+                # Build comparison summary for all groups
+                group_summaries = {}
+                for group_id in group_ids:
+                    group_metrics = metrics[group_id]
+                    group_summaries[group_id] = {
+                        "order_count": group_metrics["count"],
+                        "total_revenue": group_metrics["total_revenue"],
+                        "avg_order_value": group_metrics["avg_order_value"],
+                        "payment_mode_distribution": group_metrics["payment_mode_distribution"],
+                        "order_status_distribution": group_metrics["order_status_distribution"],
+                        "top_cities": group_metrics["top_cities"],
+                        "top_states": group_metrics["top_states"]
+                    }
+                
+                # Compare each group to baseline
+                comparisons_to_baseline = {}
+                for group_id in group_ids[1:]:  # Skip baseline itself
+                    group_metrics = metrics[group_id]
+                    comparisons_to_baseline[group_id] = {
+                        "order_count_diff": group_metrics["count"] - baseline_metrics["count"],
+                        "order_count_diff_pct": ((group_metrics["count"] - baseline_metrics["count"]) / baseline_metrics["count"] * 100) if baseline_metrics["count"] > 0 else 0,
+                        "revenue_diff": group_metrics["total_revenue"] - baseline_metrics["total_revenue"],
+                        "revenue_diff_pct": ((group_metrics["total_revenue"] - baseline_metrics["total_revenue"]) / baseline_metrics["total_revenue"] * 100) if baseline_metrics["total_revenue"] > 0 else 0,
+                        "avg_order_value_diff": group_metrics["avg_order_value"] - baseline_metrics["avg_order_value"],
+                        "avg_order_value_diff_pct": ((group_metrics["avg_order_value"] - baseline_metrics["avg_order_value"]) / baseline_metrics["avg_order_value"] * 100) if baseline_metrics["avg_order_value"] > 0 else 0
+                    }
+                
+                # Identify overall winners across all groups
+                winner_by_volume = max(group_ids, key=lambda gid: metrics[gid]["count"])
+                winner_by_revenue = max(group_ids, key=lambda gid: metrics[gid]["total_revenue"])
+                winner_by_avg_value = max(group_ids, key=lambda gid: metrics[gid]["avg_order_value"])
+                
+                comparison_results = {
+                    "comparison_type": "multi_group",
+                    "comparison_mode": True,
+                    "comparison_param": state.get("comparison_param"),
+                    "num_groups": num_groups,
+                    "groups": group_ids,
+                    "baseline": baseline_id,
+                    "group_summaries": group_summaries,
+                    "comparisons_to_baseline": comparisons_to_baseline,
+                    "overall_winners": {
+                        "by_volume": winner_by_volume,
+                        "by_revenue": winner_by_revenue,
+                        "by_avg_value": winner_by_avg_value
+                    }
+                }
+                
+                print(f"✅ [COMPARISON] {num_groups} groups compared | Winner by volume: {winner_by_volume}, by revenue: {winner_by_revenue}", flush=True)
+            
+            return {
+                **state,
+                "comparison_results": comparison_results,
+                "error": None
+            }
+            
     except Exception as e:
         print(f"❌ [COMPARISON] Error: {str(e)}", flush=True)
         return {**state, "error": f"Comparison error: {str(e)}"}
@@ -1104,6 +1444,7 @@ async def insight_generation_node(state: AgentState) -> AgentState:
 
     print(f"💡 [INSIGHTS] Generating natural language summary", flush=True)
     
+    # print("STATE: ", state, flush=True)
     try:
         await emit_step_event(
             state,
@@ -1124,15 +1465,6 @@ async def insight_generation_node(state: AgentState) -> AgentState:
                 }
         
         # Fallback: extract from first step if base_params not available
-        if not date_range and state["plan"].get("steps"):
-            first_step = state["plan"]["steps"][0]
-            step_params = first_step.get("params", {})
-            if "start_date" in step_params and "end_date" in step_params:
-                date_range = {
-                    "start_date": step_params["start_date"],
-                    "end_date": step_params["end_date"]
-                }
-        
         query_type = state["plan"].get("query_type", "standard")
         is_metric_query = query_type in ["metric_analysis", "custom_metric_generation"]
 
@@ -1306,24 +1638,28 @@ def prepare_start_node(state: AgentState) -> AgentState:
     return state
 
 
-def route_start(state: AgentState) -> Literal["planning", "grouping", "execute_tool", "error"]:
-    """Route into workflow based on whether a precomputed plan is present."""
+def route_start(state: AgentState) -> Literal["query_categorization", "planning", "grouping", "execute_tool", "error"]:
+    """Main router at the beginning of the workflow"""
     if state.get("error"):
         return "error"
 
     plan = state.get("plan")
-    if not plan:
-        return "planning"
+    
+    # If a valid precomputed plan already exists, skip categorization + planning
+    if plan and isinstance(plan, dict) and isinstance(plan.get("steps"), list):
+        if plan.get("query_type") == "comparison":
+            return "grouping"
+        return "execute_tool"
 
-    if plan.get("query_type") == "comparison":
-        return "grouping"
+    # Normal flow: start with categorization
+    return "query_categorization"
 
-    return "execute_tool"
 
 # Build the graph
 workflow = StateGraph(AgentState)
 
 # Add nodes - Standard flow
+workflow.add_node("query_categorization", query_categorization_node)
 workflow.add_node("route_start", prepare_start_node)
 workflow.add_node("planning", planning_node)
 workflow.add_node("execute_tool", execute_tool_node)
@@ -1342,7 +1678,7 @@ workflow.add_node("aggregation", aggregation_node)
 workflow.add_node("comparison", comparison_node)
 workflow.add_node("insight_generation", insight_generation_node)
 
-# Set entry point
+
 workflow.set_entry_point("route_start")
 
 # Start routing - skip planning when plan is already present
@@ -1350,12 +1686,16 @@ workflow.add_conditional_edges(
     "route_start",
     route_start,
     {
+        "query_categorization": "query_categorization",
         "planning": "planning",
         "grouping": "grouping",
         "execute_tool": "execute_tool",
         "error": "error_handler",
     }
 )
+
+# After choosing data source, head to creating a plan
+workflow.add_edge("query_categorization", "planning")
 
 # Add edges - Planning branches to comparison or standard flow
 workflow.add_conditional_edges(

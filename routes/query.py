@@ -6,7 +6,7 @@ from decimal import Decimal
 from fastapi import APIRouter, HTTPException, Header, Request
 from models import QueryRequest, ExecuteRequest
 from workflow import app as workflow_app, AgentState
-from llm_providers import planning_llm
+from llm_providers import planning_llm, query_categorization_llm
 from utils.request_log_store import append_request_log, read_request_logs, get_latest_sequence
 
 def convert_numpy_types(obj):
@@ -135,9 +135,13 @@ async def cancel_query(request_id: str, raw_request: Request):
 async def generate_plan(request: QueryRequest):
     try:
         user_query = request.query.strip()
+        
+        query_categorization_response = query_categorization_llm.invoke(user_query)
+        data_source = query_categorization_response.get('data_source')
 
-        # Generate a plan directly from the user query.
-        result = planning_llm.invoke(user_query)
+        print(f"Data Source chosen: ", data_source)
+
+        result = planning_llm.invoke(user_query, data_source)
         plan = result.get("plan", {})
         is_comparison = isinstance(plan, dict) and plan.get("query_type") == "comparison"
         

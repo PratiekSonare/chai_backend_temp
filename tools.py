@@ -4,7 +4,7 @@ Tool functions for fetching and manipulating data
 import os
 import requests
 from datetime import datetime, timedelta
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Union
 import ast
 import pandas as pd
 import numpy as np
@@ -18,11 +18,13 @@ from utils.type_converters import convert_numpy_types
 
 s3 = boto3.client('s3')
 
-MAX_CUSTOM_CALC_CODE_LEN = 4000
+MAX_CUSTOM_CALC_CODE_LEN = 8000
 MAX_CUSTOM_RESULT_SIZE = 10_000_000
 CUSTOM_CALC_TIMEOUT_SECONDS = 5
 
-
+# ===================================================================
+# HELPER FUNCTIONS
+# ===================================================================
 def _is_valid_metric_name(metric_name: str) -> bool:
     if not isinstance(metric_name, str) or not metric_name:
         return False
@@ -112,6 +114,10 @@ def _execute_custom_code_with_timeout(calculation_code: str, local_vars: dict, s
             if old_handler is not None:
                 signal.signal(signal.SIGALRM, old_handler)
 
+
+# ===================================================================
+# ORDER TOOLS
+# ===================================================================
 def get_all_orders(start_date: str, end_date: str) -> List[Dict]:
     """
     Fetch and aggregate daily orders from S3 for a date range.
@@ -146,6 +152,7 @@ def get_all_orders(start_date: str, end_date: str) -> List[Dict]:
     print(f"Fetching orders from S3: {start_date} to {end_date}")
 
     all_orders = []
+    skipped_files = []
 
     current_day = start_dt.date()
     end_day = end_dt.date()
@@ -157,7 +164,67 @@ def get_all_orders(start_date: str, end_date: str) -> List[Dict]:
 
         try:
             response = s3.get_object(Bucket=bucket_name, Key=object_key)
-            payload = json.loads(response["Body"].read().decode("utf-8"))
+            body_bytes = response["Body"].read()
+            payload = None
+            
+            # Try UTF-8 first with error handling
+            try:
+                decoded_text = body_bytes.decode("utf-8")
+                payload = json.loads(decoded_text)
+            except UnicodeDecodeError as e:
+                print(f"WARNING: UTF-8 decode error at position {e.start} in {object_key}")
+                # Fallback 1: UTF-8 with error replacement
+                try:
+                    decoded_text = body_bytes.decode("utf-8", errors="replace")
+                    payload = json.loads(decoded_text)
+                    print(f"  Recovered using UTF-8 with error replacement")
+                except json.JSONDecodeError:
+                    print(f"  JSON parse failed after UTF-8 recovery, trying repair...")
+                    # Fallback 2: Try to repair truncated JSON
+                    try:
+                        payload = _repair_json(decoded_text)
+                        if payload:
+                            print(f"  Recovered by repairing truncated JSON")
+                        else:
+                            raise ValueError("JSON repair returned None")
+                    except Exception as repair_e:
+                        print(f"  JSON repair failed: {repair_e}")
+                        # Fallback 3: Try latin-1
+                        try:
+                            decoded_text = body_bytes.decode("latin-1")
+                            payload = json.loads(decoded_text)
+                            print(f"  Recovered using latin-1 encoding")
+                        except json.JSONDecodeError:
+                            print(f"  JSON parse failed with latin-1")
+                            # Last resort: Try to repair latin-1 text
+                            try:
+                                payload = _repair_json(decoded_text)
+                                if payload:
+                                    print(f"  Recovered by repairing latin-1 JSON")
+                                else:
+                                    raise ValueError("Unable to repair JSON from any encoding")
+                            except Exception as final_repair:
+                                print(f"ERROR: Could not recover {object_key}: {final_repair}")
+                                skipped_files.append(object_key)
+                                payload = None
+            except json.JSONDecodeError as e:
+                print(f"WARNING: JSON parse error in {object_key} at line {e.lineno} col {e.colno}: {e.msg}")
+                # Try repair for initial UTF-8 decode
+                try:
+                    payload = _repair_json(decoded_text if 'decoded_text' in locals() else body_bytes.decode("utf-8", errors="replace"))
+                    if payload:
+                        print(f"  Recovered using JSON repair")
+                    else:
+                        raise ValueError("JSON repair failed")
+                except Exception as repair_e:
+                    print(f"  Could not repair JSON: {repair_e}")
+                    skipped_files.append(object_key)
+                    payload = None
+
+            if payload is None:
+                # Skip this file and continue to next
+                current_day += timedelta(days=1)
+                continue
 
             if isinstance(payload, list):
                 day_orders = payload
@@ -167,15 +234,13 @@ def get_all_orders(start_date: str, end_date: str) -> List[Dict]:
                 elif isinstance(payload.get("orders"), list):
                     day_orders = payload["orders"]
                 else:
-                    day_orders = [payload]
+                    day_orders = [payload] if payload else []
             else:
                 day_orders = []
 
             all_orders.extend(day_orders)
             print(f"Fetched {len(day_orders)} orders from s3://{bucket_name}/{object_key}")
-        except json.JSONDecodeError as e:
-            print(f"Invalid JSON in s3://{bucket_name}/{object_key}: {e}")
-            raise
+            
         except Exception as e:
             error_code = None
             if hasattr(e, "response") and isinstance(getattr(e, "response"), dict):
@@ -185,12 +250,75 @@ def get_all_orders(start_date: str, end_date: str) -> List[Dict]:
                 print(f"No file found for {current_day}: s3://{bucket_name}/{object_key}")
             else:
                 print(f"Error fetching s3://{bucket_name}/{object_key}: {e}")
-                raise
+                skipped_files.append(object_key)
 
         current_day += timedelta(days=1)
 
-    print(f"Total orders fetched across all S3 daily files: {len(all_orders)}")
+    if skipped_files:
+        print(f"\n⚠️  WARNING: Skipped {len(skipped_files)} corrupted files:")
+        for f in skipped_files[:5]:  # Show first 5
+            print(f"  - {f}")
+        if len(skipped_files) > 5:
+            print(f"  ... and {len(skipped_files) - 5} more")
+        print(f"These files should be investigated and regenerated from source.\n")
+
+    print(f"Total orders fetched across {(end_day - start_dt.date()).days + 1 - len(skipped_files)} valid S3 daily files: {len(all_orders)}")
     return all_orders
+
+
+def _repair_json(text: str) -> Optional[Dict | List]:
+    """
+    Attempt to repair truncated or malformed JSON by finding last valid closing bracket.
+    Returns parsed JSON if successful, None otherwise.
+    """
+    if not text or not isinstance(text, str):
+        return None
+    
+    text = text.strip()
+    
+    # Try original first
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    
+    # Try to find last valid JSON object/array by finding closing ] or }
+    # Strategy: Find last ] or }, truncate there, and try parsing
+    last_bracket_idx = max(
+        text.rfind(']'),
+        text.rfind('}')
+    )
+    
+    if last_bracket_idx <= 0:
+        return None
+    
+    try:
+        truncated = text[:last_bracket_idx + 1]
+        return json.loads(truncated)
+    except json.JSONDecodeError:
+        # If truncating to last bracket didn't work, try to find valid JSON array of objects
+        # Look for patterns like [{"key": value}, ...
+        try:
+            # Try to extract array if wrapped in array
+            if text.strip().startswith('['):
+                # Find all complete objects within array
+                import re
+                object_pattern = r'\{[^{}]*\}'
+                matches = re.findall(object_pattern, text)
+                if matches:
+                    valid_objects = []
+                    for match in matches:
+                        try:
+                            valid_objects.append(json.loads(match))
+                        except:
+                            pass
+                    if valid_objects:
+                        return valid_objects
+        except Exception:
+            pass
+        
+        return None
+
 
 #for any metric, data calculation, first convert to dataframe and then continue.
 def convert_to_df(raw: list) -> pd.DataFrame:
@@ -207,34 +335,22 @@ def convert_to_df(raw: list) -> pd.DataFrame:
         # If parsed is a dict and contains top-level 'data'
         if isinstance(parsed, dict) and 'data' in parsed:
             data_block = parsed.get('data')
-
-            # Common API shape: {'data': {'orders': [...]}}
             if isinstance(data_block, dict) and 'orders' in data_block:
                 orders = data_block.get('orders') or []
-            # Sometimes 'data' itself is the list of orders
             elif isinstance(data_block, list):
                 orders = data_block
-            # If 'data' is a single order dict, wrap it
             elif isinstance(data_block, dict):
                 orders = [data_block]
             else:
                 orders = []
-
-        # If parsed is a dict with 'orders' key at top-level
         elif isinstance(parsed, dict) and 'orders' in parsed:
             orders = parsed.get('orders') or []
-
-        # If parsed is already a list of orders
         elif isinstance(parsed, list):
             orders = parsed
-
-        # If parsed is a single order dict, wrap into list
         elif isinstance(parsed, dict):
             orders = [parsed]
-
         else:
             raise ValueError(f"Unsupported raw data type: {type(raw)}. Expected JSON string, dict, or list of orders.")
-
     except Exception as e:
         print(f"Error parsing raw input in convert_to_df: {e}")
         raise
@@ -243,12 +359,30 @@ def convert_to_df(raw: list) -> pd.DataFrame:
     if orders is None:
         orders = []
 
-    df = pd.json_normalize(orders)
+    # Explode suborders: each suborder becomes a row, with suborder_ prefix for its fields
+    exploded_rows = []
+    for order in orders:
+        suborders = order.get('suborders')
+        if isinstance(suborders, list) and len(suborders) > 0:
+            for sub in suborders:
+                # Copy parent order fields
+                row = {k: v for k, v in order.items() if k != 'suborders'}
+                # Add suborder fields with prefix
+                for subk, subv in sub.items():
+                    row[f'suborder_{subk}'] = subv
+                exploded_rows.append(row)
+        else:
+            # No suborders, just add the order as is
+            row = {k: v for k, v in order.items() if k != 'suborders'}
+            exploded_rows.append(row)
 
+    df = pd.json_normalize(exploded_rows)
+
+    print("========================")
+    print("columns:", list(df.columns), flush=True)
     print("========================")
     print("normalized dataframe: ")
     print(df.head(5), flush=True)
-    df.to_csv("normalized_db.csv", index=False)
     print("========================")
 
     return df
@@ -406,169 +540,6 @@ def get_average_tax(table: pd.DataFrame) -> float:
         return None
 
 
-# Statistical Tools
-def get_statistical_summary(table: pd.DataFrame, field: str) -> dict:
-    """Get comprehensive statistical summary for a numeric field"""
-    try:
-        if table.empty or field not in table.columns:
-            return {
-                'count': 0, 'mean': 0.0, 'median': 0.0, 'std': 0.0,
-                'min': 0.0, 'max': 0.0, 'q25': 0.0, 'q75': 0.0
-            }
-        
-        series = pd.to_numeric(table[field], errors='coerce')
-        clean_series = series.dropna()
-        
-        if len(clean_series) == 0:
-            return {
-                'count': 0, 'mean': 0.0, 'median': 0.0, 'std': 0.0,
-                'min': 0.0, 'max': 0.0, 'q25': 0.0, 'q75': 0.0
-            }
-        
-        stats = {
-            'count': len(clean_series),
-            'mean': round(clean_series.mean(), 2),
-            'median': round(clean_series.median(), 2),
-            'std': round(clean_series.std(), 2),
-            'min': round(clean_series.min(), 2),
-            'max': round(clean_series.max(), 2),
-            'q25': round(clean_series.quantile(0.25), 2),
-            'q75': round(clean_series.quantile(0.75), 2)
-        }
-        return convert_numpy_types(stats)
-    except Exception as e:
-        print(f"Error in calculating statistical summary for {field}: {e}")
-        return None
-
-
-def get_percentile(table: pd.DataFrame, field: str, percentile: float) -> float:
-    """Get specific percentile for a numeric field"""
-    try:
-        if table.empty or field not in table.columns:
-            return 0.0
-        
-        series = pd.to_numeric(table[field], errors='coerce')
-        clean_series = series.dropna()
-        
-        if len(clean_series) == 0:
-            return 0.0
-        
-        result = clean_series.quantile(percentile / 100)
-        final_result = round(result, 2) if not pd.isna(result) else 0.0
-        return convert_numpy_types(final_result)
-    except Exception as e:
-        print(f"Error in calculating {percentile}th percentile for {field}: {e}")
-        return None
-
-
-def get_top_percentile(table: pd.DataFrame, field: str, percentile: float = 95) -> dict:
-    """Get records in top percentile for a field"""
-    try:
-        if table.empty or field not in table.columns:
-            return {
-                'threshold': 0.0, 'count': 0, 'percentage': 0.0, 'total_value': 0.0
-            }
-        
-        series = pd.to_numeric(table[field], errors='coerce')
-        clean_series = series.dropna()
-        
-        if len(clean_series) == 0:
-            return {
-                'threshold': 0.0, 'count': 0, 'percentage': 0.0, 'total_value': 0.0
-            }
-        
-        threshold = clean_series.quantile(percentile / 100)
-        # Use boolean indexing safely
-        mask = series >= threshold
-        top_records = table[mask]
-        
-        if top_records.empty:
-            return {
-                'threshold': round(threshold, 2),
-                'count': 0,
-                'percentage': 0.0,
-                'total_value': 0.0
-            }
-        
-        result = {
-            'threshold': round(threshold, 2),
-            'count': len(top_records),
-            'percentage': round(len(top_records) / len(table) * 100, 2),
-            'total_value': round(pd.to_numeric(top_records[field], errors='coerce').sum(), 2)
-        }
-        return convert_numpy_types(result)
-    except Exception as e:
-        print(f"Error in calculating top {percentile}% for {field}: {e}")
-        return None
-
-
-def get_bottom_percentile(table: pd.DataFrame, field: str, percentile: float = 5) -> dict:
-    """Get records in bottom percentile for a field"""
-    try:
-        if table.empty or field not in table.columns:
-            return {
-                'threshold': 0.0, 'count': 0, 'percentage': 0.0, 'total_value': 0.0
-            }
-        
-        series = pd.to_numeric(table[field], errors='coerce')
-        clean_series = series.dropna()
-        
-        if len(clean_series) == 0:
-            return {
-                'threshold': 0.0, 'count': 0, 'percentage': 0.0, 'total_value': 0.0
-            }
-        
-        threshold = clean_series.quantile(percentile / 100)
-        # Use boolean indexing safely
-        mask = series <= threshold
-        bottom_records = table[mask]
-        
-        if bottom_records.empty:
-            return {
-                'threshold': round(threshold, 2),
-                'count': 0,
-                'percentage': 0.0,
-                'total_value': 0.0
-            }
-        
-        result = {
-            'threshold': round(threshold, 2),
-            'count': len(bottom_records),
-            'percentage': round(len(bottom_records) / len(table) * 100, 2),
-            'total_value': round(pd.to_numeric(bottom_records[field], errors='coerce').sum(), 2)
-        }
-        return convert_numpy_types(result)
-    except Exception as e:
-        print(f"Error in calculating bottom {percentile}% for {field}: {e}")
-        return None
-
-
-def get_correlation_matrix(table: pd.DataFrame, fields: list) -> dict:
-    """Calculate correlation matrix between numeric fields"""
-    try:
-        if table.empty or not fields:
-            return {}
-        
-        # Check if all fields exist in the DataFrame
-        available_fields = [field for field in fields if field in table.columns]
-        
-        if len(available_fields) < 2:
-            return {"error": "At least 2 valid numeric fields required for correlation"}
-        
-        numeric_data = table[available_fields].apply(pd.to_numeric, errors='coerce')
-        # Remove columns that are all NaN
-        numeric_data = numeric_data.dropna(axis=1, how='all')
-        
-        if numeric_data.empty or numeric_data.shape[1] < 2:
-            return {"error": "Insufficient numeric data for correlation calculation"}
-        
-        corr_matrix = numeric_data.corr().round(3)
-        return convert_numpy_types(corr_matrix.to_dict())
-    except Exception as e:
-        print(f"Error in calculating correlation matrix: {e}")
-        return None
-
-
 def get_conversion_rate(table: pd.DataFrame, success_status: str = 'Delivered') -> float:
     """Calculate order conversion rate based on successful deliveries"""
     try:
@@ -664,91 +635,6 @@ def get_common_metrics(data) -> dict:
         return {"error": f"Failed to calculate metrics: {str(e)}"}
 
 
-def execute_custom_calculation(
-    table: pd.DataFrame, 
-    calculation_code: str, 
-    metric_name: str = "custom_metric"
-) -> dict:
-    """
-    Safe execution of LLM-generated Python code for custom metrics on a DataFrame.
-    Designed for REPL-like usage where the LLM can generate one-off calculations.
-    """
-    if not isinstance(calculation_code, str) or not calculation_code.strip():
-        return {
-            "success": False,
-            "error": "Calculation code cannot be empty",
-            "metric_name": metric_name,
-            "calculation_code": ""
-        }
-
-    try:
-        # Basic validations
-        if not _is_valid_metric_name(metric_name):
-            return _error_response(metric_name, "Invalid metric name. Use only letters, numbers, and underscores.", calculation_code)
-
-        if table.empty:
-            return _error_response(metric_name, "DataFrame is empty", calculation_code)
-
-        # Strict code validation (this is the most important layer)
-        is_valid, validation_message = _validate_custom_calculation_code(calculation_code)
-        if not is_valid:
-            return _error_response(metric_name, f"Code validation failed: {validation_message}", calculation_code)
-
-        # Prepare safe environment
-        local_vars = {
-            'df': table.copy(),           # always give a copy
-            'pd': pd,
-            'np': np,
-            'math': math,
-            'datetime': datetime,
-            'result': None,
-            # Common helpful aliases
-            'df': table.copy(),  # redundant but clear
-        }
-
-        safe_builtins = {
-            'len': len, 'max': max, 'min': min, 'sum': sum, 'abs': abs,
-            'round': round, 'sorted': sorted, 'enumerate': enumerate,
-            'range': range, 'zip': zip, 'any': any, 'all': all,
-            'bool': bool, 'int': int, 'float': float, 'str': str,
-            'list': list, 'dict': dict, 'set': set, 'tuple': tuple,
-        }
-
-        # Execute with timeout protection
-        _execute_custom_code_with_timeout(calculation_code, local_vars, safe_builtins)
-
-        result = local_vars.get('result')
-        if result is None:
-            return _error_response(
-                metric_name, 
-                "Your code must assign the final value to a variable named `result`", 
-                calculation_code
-            )
-
-        # Size guard
-        if sys.getsizeof(result) > MAX_CUSTOM_RESULT_SIZE:
-            return _error_response(
-                metric_name, 
-                f"Result too large ({sys.getsizeof(result)} bytes). Max: {MAX_CUSTOM_RESULT_SIZE} bytes", 
-                calculation_code
-            )
-
-        result = convert_numpy_types(result)
-
-        return {
-            "success": True,
-            "metric_name": metric_name,
-            "result": result,
-            "calculation_code": calculation_code,
-            "row_count": len(table)
-        }
-
-    except TimeoutError:
-        return _error_response(metric_name, f"Calculation timed out after {CUSTOM_CALC_TIMEOUT_SECONDS} seconds", calculation_code)
-    except Exception as e:
-        return _error_response(metric_name, f"Execution error: {type(e).__name__}: {str(e)}", calculation_code)
-
-
 def _error_response(metric_name: str, error: str, code: str) -> dict:
     """Helper for consistent error format"""
     return {
@@ -758,6 +644,7 @@ def _error_response(metric_name: str, error: str, code: str) -> dict:
         "calculation_code": code[:600] if isinstance(code, str) else "",
         "result": None
     }
+
 
 def get_geographic_insights(table: pd.DataFrame, top_n: int = 5) -> dict:
     """Get geographic distribution insights"""
@@ -784,251 +671,6 @@ def get_geographic_insights(table: pd.DataFrame, top_n: int = 5) -> dict:
     except Exception as e:
         print(f"Error in calculating geographic insights: {e}")
         return None
-
-def _fetch_orders_window(start_date: str, end_date: str, api_key: str, jwt_token: str, base_url: str) -> List[Dict]:
-    """Fetch all orders for a date window with pagination support"""
-    all_orders = []
-    url = f"{base_url}/orders/V2/getAllOrders"
-    
-    params = {
-        "limit": 250,
-        "start_date": start_date,
-        "end_date": end_date
-    }
-    
-    headers = {
-        "x-api-key": api_key,
-        "Authorization": f"Bearer {jwt_token}",
-        "Content-Type": "application/json"
-    }
-    
-    page = 1
-    
-    while True:
-        try:
-            print(f"Fetching page {page} for date range {start_date} to {end_date}")
-            response = requests.get(url, params=params, headers=headers)
-            
-            # Check if we got a 400 Bad Request (end of pagination)
-            if response.status_code == 400:
-                print(f"Reached end of pagination (400 Bad Request) at page {page}")
-                break
-                
-            response.raise_for_status()
-            
-            data = response.json()
-            if data.get("code") != 200 or "data" not in data:
-                print(f"API returned non-200 code or missing data: {data}")
-                break
-            
-            # Extract orders from current page
-            page_orders = data["data"].get("orders", [])
-            if not page_orders:
-                print(f"No orders found on page {page}, ending pagination")
-                break
-                
-            all_orders.extend(page_orders)
-            print(f"Fetched {len(page_orders)} orders from page {page}")
-            
-            # Check for nextUrl to continue pagination
-            next_url = data["data"].get("nextUrl")
-            if not next_url:
-                print(f"No nextUrl found, ending pagination at page {page}")
-                break
-            
-            # Update URL for next request
-            # nextUrl is usually a relative path, so prepend base_url
-            try:
-                if next_url.startswith('/'):
-                    url = f"{base_url}{next_url}"
-                elif next_url.startswith('http'):
-                    url = next_url
-                else:
-                    url = f"{base_url}/{next_url.lstrip('/')}"
-            except Exception as e:
-                print(f"Error processing nextUrl '{next_url}': {e}, ending pagination")
-                break
-            
-            # Clear params for subsequent requests since nextUrl contains all needed parameters
-            params = {}
-            page += 1
-            
-        except requests.exceptions.RequestException as e:
-            print(f"Error fetching orders on page {page}: {e}")
-            break
-    
-    print(f"Total orders fetched for window {start_date} to {end_date}: {len(all_orders)}")
-    return all_orders
-
-
-def apply_filters(table: List[Dict], filters: List[Dict]) -> List[Dict]:
-    """
-    Apply filters to order table
-    
-    Args:
-        data: List of order records
-        filters: List of filter dictionaries with structure:
-            [{"field": "payment_mode", "operator": "eq", "value": "PrePaid"}, ...]
-    
-    Returns:
-        Filtered list of orders
-    """
-    if not filters:
-        return table
-    
-    # Fields that are nested in suborders[] array
-    NESTED_FIELDS = {
-        "sku", "brand", "category", "size", "productName", "selling_price", 
-        "mrp", "model_no", "AccountingSku", "Identifier", "accounting_unit",
-        "ean", "marketplace_sku", "item_status", "shipment_type", "sku_type",
-        "tax", "tax_rate", "tax_type", "cost", "item_quantity", "description",
-        "product_id", "company_product_id", "suborder_id", "suborder_num",
-        "suborder_reference_num", "weight", "height", "length", "width"
-    }
-    
-    filtered_data = table
-    
-    for filter_spec in filters:
-        field = filter_spec.get("field")
-        operator = filter_spec.get("operator", "eq")
-        value = filter_spec.get("value")
-        
-        # Debug logging
-        print(f"[DEBUG FILTER] Field: {field}, Operator: {operator}, Value: {value} (type: {type(value).__name__})", flush=True)
-        
-        # Special handling for fields nested in suborders array
-        if field in NESTED_FIELDS:
-            before_count = len(filtered_data)
-            if operator == "eq":
-                # For numeric comparisons, try to convert both sides to float
-                try:
-                    numeric_value = float(value)
-                    filtered_data = [
-                        r for r in filtered_data 
-                        if any(
-                            float(sub.get(field, 0)) == numeric_value
-                            for sub in r.get("suborders", [])
-                            if sub.get(field) is not None
-                        )
-                    ]
-                except (ValueError, TypeError):
-                    # String comparison (case-insensitive)
-                    filtered_data = [
-                        r for r in filtered_data 
-                        if any(
-                            str(sub.get(field, "")).lower() == str(value).lower() 
-                            for sub in r.get("suborders", [])
-                        )
-                    ]
-            elif operator == "ne":
-                try:
-                    numeric_value = float(value)
-                    filtered_data = [
-                        r for r in filtered_data 
-                        if any(
-                            float(sub.get(field, 0)) != numeric_value
-                            for sub in r.get("suborders", [])
-                            if sub.get(field) is not None
-                        )
-                    ]
-                except (ValueError, TypeError):
-                    filtered_data = [
-                        r for r in filtered_data 
-                        if any(
-                            str(sub.get(field, "")).lower() != str(value).lower() 
-                            for sub in r.get("suborders", [])
-                        )
-                    ]
-            elif operator == "gt":
-                filtered_data = [
-                    r for r in filtered_data 
-                    if any(
-                        float(sub.get(field, 0)) > float(value)
-                        for sub in r.get("suborders", [])
-                        if sub.get(field) is not None
-                    )
-                ]
-            elif operator == "lt":
-                filtered_data = [
-                    r for r in filtered_data 
-                    if any(
-                        float(sub.get(field, 0)) < float(value)
-                        for sub in r.get("suborders", [])
-                        if sub.get(field) is not None
-                    )
-                ]
-            elif operator == "gte":
-                filtered_data = [
-                    r for r in filtered_data 
-                    if any(
-                        float(sub.get(field, 0)) >= float(value)
-                        for sub in r.get("suborders", [])
-                        if sub.get(field) is not None
-                    )
-                ]
-            elif operator == "lte":
-                filtered_data = [
-                    r for r in filtered_data 
-                    if any(
-                        float(sub.get(field, 0)) <= float(value)
-                        for sub in r.get("suborders", [])
-                        if sub.get(field) is not None
-                    )
-                ]
-            elif operator == "contains":
-                value_str = str(value).lower() if value is not None else ""
-                filtered_data = [
-                    r for r in filtered_data 
-                    if any(
-                        value_str in str(sub.get(field, "")).lower() 
-                        for sub in r.get("suborders", [])
-                    )
-                ]
-            elif operator == "in":
-                filtered_data = [
-                    r for r in filtered_data 
-                    if any(
-                        sub.get(field) in value 
-                        for sub in r.get("suborders", [])
-                    )
-                ]
-            print(f"[DEBUG FILTER] Nested field '{field}' filter: {before_count} → {len(filtered_data)} records (nested in suborders)", flush=True)
-            continue
-        
-        # Handle top-level fields (payment_mode, marketplace, order_status, state, city, etc.)
-        if operator == "eq":
-            # Case-insensitive string comparison for string values
-            if isinstance(value, str):
-                before_count = len(filtered_data)
-                filtered_data = [r for r in filtered_data if str(r.get(field, "")).lower() == value.lower()]
-                print(f"[DEBUG FILTER] EQ filter: {before_count} → {len(filtered_data)} records (field={field}, value={value})", flush=True)
-                
-                print(filtered_data)
-                
-                # Show first few actual values for debugging
-                if before_count > 0 and len(filtered_data) == 0:
-                    sample_values = [r.get(field) for r in table[:5]]
-                    print(f"[DEBUG FILTER] Sample values in table: {sample_values}", flush=True)
-            else:
-                filtered_data = [r for r in filtered_data if r.get(field) == value]
-        elif operator == "ne":
-            filtered_data = [r for r in filtered_data if r.get(field) != value]
-        elif operator == "gt":
-            filtered_data = [r for r in filtered_data if r.get(field, 0) > value]
-        elif operator == "lt":
-            filtered_data = [r for r in filtered_data if r.get(field, 0) < value]
-        elif operator == "gte":
-            filtered_data = [r for r in filtered_data if r.get(field, 0) >= value]
-        elif operator == "lte":
-            filtered_data = [r for r in filtered_data if r.get(field, 0) <= value]
-        elif operator == "contains":
-            # Safely handle contains operator - convert both to strings
-            value_str = str(value).lower() if value is not None else ""
-            filtered_data = [r for r in filtered_data if value_str in str(r.get(field, "")).lower()]
-        elif operator == "in":
-            filtered_data = [r for r in filtered_data if r.get(field) in value]
-    
-    return filtered_data
 
 
 def get_schema_info(entity: str = "orders", field: str = None) -> Dict[str, Any]:
@@ -1229,8 +871,599 @@ def get_schema_info(entity: str = "orders", field: str = None) -> Dict[str, Any]
             "available_entities": ["orders"]
         }
 
+def get_cancelled_count(table: pd.DataFrame) -> dict:
+    """Return count cancelled orders"""
+    try:
+        if table.empty:
+            return {
+                "cancel_count": 0
+            }
+
+        cancel_count = (table['order_status'] == "Cancelled").sum()
+        return {
+            "cancel_count": int(cancel_count) 
+        }    
+    except Exception as e:
+        print(f"Error in calculating geographic insights: {e}")
+        return None
+
+# ===================================================================
+# PROFIT TOOLS
+# ===================================================================
+try:
+    from supabase import create_client, Client
+    
+    SUPABASE_URL = os.getenv('SUPABASE_URL')    
+    SUPABASE_KEY = os.getenv('SUPABASE_KEY')
+    
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise ValueError("SUPABASE_URL and SUPABASE_KEY environment variables not set")
+    
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+except Exception as e:
+    print(f"⚠️  Supabase client initialization warning: {str(e)}")
+    supabase = None
+
+def get_vendor_cost_sheet(supabase_url=SUPABASE_URL, supabase_key=SUPABASE_KEY) -> pd.DataFrame:
+    """
+    Fetch vendor_cost_sheet from Supabase & return as List[Dict].
+    (Directly returns the raw data — not the same as orders table)
+    """
+    if not supabase_url or not supabase_key:
+        raise ValueError("Missing Supabase credentials. Please set SUPABASE_URL and SUPABASE_KEY environment variables.")
+
+    # Fetch the entire table
+    response = (
+        supabase.table("vendor_cost_sheet")        # ← Change if your actual table name is different
+        .select("*")
+        .execute()
+    )
+
+    # response.data is already a List[Dict]
+    data: List[Dict] = response.data
+
+    if not data:
+        print("Warning: vendor_cost_sheet returned no data.")
+
+    return pd.DataFrame(data) #return dataframe
+
+
+def _ensure_dataframe(data: Union[pd.DataFrame, list]) -> pd.DataFrame:
+    """Helper to force input into a pandas DataFrame.
+    
+    IMPORTANT: This function expects either:
+    - A pandas DataFrame
+    - A list of dictionaries
+    
+    DO NOT pass individual dicts! Always wrap in a list: [record]
+    
+    Examples:
+    ✅ _ensure_dataframe([{"MRP": 100, "Final price": 80}])  # Good
+    ❌ _ensure_dataframe({"MRP": 100, "Final price": 80})     # Bad - will fail
+    """
+    if isinstance(data, list):
+        return pd.DataFrame(data)
+    elif isinstance(data, dict):
+        # Defensive handling: if someone passes a dict, wrap it in a list first
+        return pd.DataFrame([data])
+    return data  # Assume it's already a DataFrame
+
+def _get_clean_series(table: Union[pd.DataFrame, list], col_name: str) -> pd.Series:
+    """Helper to safely extract a numeric series from a column."""
+    df = _ensure_dataframe(table)
+    if col_name not in df.columns or df.empty:
+        return pd.Series(dtype=float)
+    return pd.to_numeric(df[col_name], errors='coerce').fillna(0)
+
+def get_margin(table: Union[pd.DataFrame, list]) -> Optional[float]:
+    """Calculates row-wise Margin % and returns the sum."""
+    df = _ensure_dataframe(table)
+    mrp = _get_clean_series(df, "MRP")
+    cost = _get_clean_series(df, "Final price")
+    
+    if mrp.empty and cost.empty:
+        return None
+
+    gp = mrp - cost
+    # Handle division by zero: if MRP is 0, margin is 0
+    margins = (gp / mrp).where(mrp != 0, 0) * 100
+    return round(float(margins.sum()), 2)
+
+def get_gross_profit(table: Union[pd.DataFrame, list]) -> Optional[float]:
+    """Returns the total sum of Gross Profit across all items."""
+    df = _ensure_dataframe(table)
+    mrp = _get_clean_series(df, "MRP")
+    cost = _get_clean_series(df, "Final price")
+    
+    if mrp.empty and cost.empty:
+        return None
+        
+    return round(float((mrp - cost).sum()), 2)
+
+def get_markup(table: Union[pd.DataFrame, list]) -> Optional[float]:
+    """Calculates row-wise Markup and returns the total sum."""
+    df = _ensure_dataframe(table)
+    mrp = _get_clean_series(df, "MRP")
+    cost = _get_clean_series(df, "Final price")
+    
+    if mrp.empty and cost.empty:
+        return None
+
+    gp = mrp - cost
+    # Handle division by zero: if Cost is 0, markup is 0
+    markups = (gp / cost).where(cost != 0, 0)
+    return round(float(markups.sum()), 4)
+
+def get_selling_price(table: Union[pd.DataFrame, list]) -> float:
+    """Returns total sum of MRP."""
+    return round(float(_get_clean_series(table, "MRP").sum()), 2)
+
+def get_cost_price(table: Union[pd.DataFrame, list]) -> float:
+    """Returns total sum of Final price."""
+    return round(float(_get_clean_series(table, "Final price").sum()), 2)
+
+def get_cost_to_price_ratio(table: Union[pd.DataFrame, list]) -> Optional[float]:
+    """Cost-to-Price Ratio % = (Total Cost / Total Selling Price) * 100"""
+    cp = get_cost_price(table)
+    sp = get_selling_price(table)
+    if sp == 0:
+        return None
+    return round((cp / sp) * 100, 2)
+    
+   
+# ===================================================================
+# COMMON TOOLS
+# =================================================================== 
+def execute_custom_calculation(
+    table: pd.DataFrame, 
+    calculation_code: str, 
+    metric_name: str = "custom_metric"
+) -> dict:
+    """
+    Safe execution of LLM-generated Python code for custom metrics on a DataFrame.
+    Designed for REPL-like usage where the LLM can generate one-off calculations.
+    """
+    if not isinstance(calculation_code, str) or not calculation_code.strip():
+        return {
+            "success": False,
+            "error": "Calculation code cannot be empty",
+            "metric_name": metric_name,
+            "calculation_code": ""
+        }
+
+    try:
+        # Basic validations
+        if not _is_valid_metric_name(metric_name):
+            return _error_response(metric_name, "Invalid metric name. Use only letters, numbers, and underscores.", calculation_code)
+
+        if table.empty:
+            return _error_response(metric_name, "DataFrame is empty", calculation_code)
+
+        # Strict code validation (this is the most important layer)
+        is_valid, validation_message = _validate_custom_calculation_code(calculation_code)
+        if not is_valid:
+            return _error_response(metric_name, f"Code validation failed: {validation_message}", calculation_code)
+
+        # Prepare safe environment
+        local_vars = {
+            'df': table.copy(),           # always give a copy
+            'pd': pd,
+            'np': np,
+            'math': math,
+            'datetime': datetime,
+            'result': None,
+        }
+
+        safe_builtins = {
+            # Core functions
+            'len': len, 'max': max, 'min': min, 'sum': sum, 'abs': abs,
+            'round': round, 'sorted': sorted, 'enumerate': enumerate,
+            'range': range, 'zip': zip, 'any': any, 'all': all,
+            'map': map, 'filter': filter, 'reversed': reversed,
+            'next': next, 'slice': slice,
+            # Types
+            'bool': bool, 'int': int, 'float': float, 'str': str,
+            'list': list, 'dict': dict, 'set': set, 'tuple': tuple,
+            'type': type, 'object': object, 'complex': complex,
+            'bytes': bytes, 'bytearray': bytearray, 'memoryview': memoryview,
+            'frozenset': frozenset, 'property': property,
+            # Exception classes
+            'Exception': Exception, 'ValueError': ValueError, 'TypeError': TypeError,
+            'KeyError': KeyError, 'IndexError': IndexError, 'ZeroDivisionError': ZeroDivisionError,
+            'AttributeError': AttributeError, 'StopIteration': StopIteration, 'AssertionError': AssertionError,
+            'NotImplementedError': NotImplementedError, 'RuntimeError': RuntimeError, 'OSError': OSError,
+            'ImportError': ImportError, 'NameError': NameError, 'UnboundLocalError': UnboundLocalError,
+            'ArithmeticError': ArithmeticError, 'OverflowError': OverflowError, 'EOFError': EOFError,
+            'IOError': IOError, 'LookupError': LookupError, 'MemoryError': MemoryError,
+            'ReferenceError': ReferenceError, 'TabError': TabError, 'SystemExit': SystemExit,
+            # Utility functions
+            'isinstance': isinstance, 'issubclass': issubclass, 'id': id, 'hash': hash,
+            'all': all, 'any': any, 'callable': callable, 'chr': chr, 'ord': ord,
+            'divmod': divmod, 'pow': pow, 'sum': sum, 'min': min, 'max': max,
+            'abs': abs, 'repr': repr, 'str': str, 'format': format,
+            'bin': bin, 'oct': oct, 'hex': hex,
+            # Safe constants
+            'True': True, 'False': False, 'None': None,
+        }
+
+        # Execute with timeout protection
+        _execute_custom_code_with_timeout(calculation_code, local_vars, safe_builtins)
+
+        result = local_vars.get('result')
+        if result is None:
+            return _error_response(
+                metric_name, 
+                "Your code must assign the final value to a variable named `result`", 
+                calculation_code
+            )
+
+        # Size guard
+        if sys.getsizeof(result) > MAX_CUSTOM_RESULT_SIZE:
+            return _error_response(
+                metric_name, 
+                f"Result too large ({sys.getsizeof(result)} bytes). Max: {MAX_CUSTOM_RESULT_SIZE} bytes", 
+                calculation_code
+            )
+
+        result = convert_numpy_types(result)
+
+        return {
+            "success": True,
+            "metric_name": metric_name,
+            "result": result,
+            "calculation_code": calculation_code,
+            "row_count": len(table)
+        }
+
+    except TimeoutError:
+        return _error_response(metric_name, f"Calculation timed out after {CUSTOM_CALC_TIMEOUT_SECONDS} seconds", calculation_code)
+    except Exception as e:
+        return _error_response(metric_name, f"Execution error: {type(e).__name__}: {str(e)}", calculation_code)
+
+
+def apply_filters(table: List[Dict], filters: List[Dict]) -> List[Dict]:
+    """
+    Apply filters to order table (ALSO WORKS FOR PROFIT TABLE, SINCE NO COMMON PARAMS)
+    
+    Args:
+        data: List of order records
+        filters: List of filter dictionaries with structure:
+            [{"field": "payment_mode", "operator": "eq", "value": "PrePaid"}, ...]
+    
+    Returns:
+        Filtered list of orders
+    """
+    # Accept either a list of dicts or a pandas DataFrame
+    if isinstance(table, pd.DataFrame):
+        try:
+            table = table.to_dict(orient='records')
+        except Exception:
+            # If conversion fails, fall back to empty list
+            table = []
+
+    if not filters:
+        return table
+    
+    # Fields that are nested in suborders[] array
+    NESTED_FIELDS = {
+        "sku", "brand", "category", "size", "productName", "selling_price", 
+        "mrp", "model_no", "AccountingSku", "Identifier", "accounting_unit",
+        "ean", "marketplace_sku", "item_status", "shipment_type", "sku_type",
+        "tax", "tax_rate", "tax_type", "cost", "item_quantity", "description",
+        "product_id", "company_product_id", "suborder_id", "suborder_num",
+        "suborder_reference_num", "weight", "height", "length", "width"
+    }
+    
+    filtered_data = table
+    
+    for filter_spec in filters:
+        field = filter_spec.get("field")
+        operator = filter_spec.get("operator", "eq")
+        value = filter_spec.get("value")
+        
+        # Debug logging
+        print(f"[DEBUG FILTER] Field: {field}, Operator: {operator}, Value: {value} (type: {type(value).__name__})", flush=True)
+        
+        # Special handling for fields nested in suborders array
+        if field in NESTED_FIELDS:
+            before_count = len(filtered_data)
+            if operator == "eq":
+                # For numeric comparisons, try to convert both sides to float
+                try:
+                    numeric_value = float(value)
+                    filtered_data = [
+                        r for r in filtered_data 
+                        if any(
+                            float(sub.get(field, 0)) == numeric_value
+                            for sub in r.get("suborders", [])
+                            if sub.get(field) is not None
+                        )
+                    ]
+                except (ValueError, TypeError):
+                    # String comparison (case-insensitive)
+                    filtered_data = [
+                        r for r in filtered_data 
+                        if any(
+                            str(sub.get(field, "")).lower() == str(value).lower() 
+                            for sub in r.get("suborders", [])
+                        )
+                    ]
+            elif operator == "ne":
+                try:
+                    numeric_value = float(value)
+                    filtered_data = [
+                        r for r in filtered_data 
+                        if any(
+                            float(sub.get(field, 0)) != numeric_value
+                            for sub in r.get("suborders", [])
+                            if sub.get(field) is not None
+                        )
+                    ]
+                except (ValueError, TypeError):
+                    filtered_data = [
+                        r for r in filtered_data 
+                        if any(
+                            str(sub.get(field, "")).lower() != str(value).lower() 
+                            for sub in r.get("suborders", [])
+                        )
+                    ]
+            elif operator == "gt":
+                filtered_data = [
+                    r for r in filtered_data 
+                    if any(
+                        float(sub.get(field, 0)) > float(value)
+                        for sub in r.get("suborders", [])
+                        if sub.get(field) is not None
+                    )
+                ]
+            elif operator == "lt":
+                filtered_data = [
+                    r for r in filtered_data 
+                    if any(
+                        float(sub.get(field, 0)) < float(value)
+                        for sub in r.get("suborders", [])
+                        if sub.get(field) is not None
+                    )
+                ]
+            elif operator == "gte":
+                filtered_data = [
+                    r for r in filtered_data 
+                    if any(
+                        float(sub.get(field, 0)) >= float(value)
+                        for sub in r.get("suborders", [])
+                        if sub.get(field) is not None
+                    )
+                ]
+            elif operator == "lte":
+                filtered_data = [
+                    r for r in filtered_data 
+                    if any(
+                        float(sub.get(field, 0)) <= float(value)
+                        for sub in r.get("suborders", [])
+                        if sub.get(field) is not None
+                    )
+                ]
+            elif operator == "contains":
+                value_str = str(value).lower() if value is not None else ""
+                filtered_data = [
+                    r for r in filtered_data 
+                    if any(
+                        value_str in str(sub.get(field, "")).lower() 
+                        for sub in r.get("suborders", [])
+                    )
+                ]
+            elif operator == "in":
+                filtered_data = [
+                    r for r in filtered_data 
+                    if any(
+                        sub.get(field) in value 
+                        for sub in r.get("suborders", [])
+                    )
+                ]
+            print(f"[DEBUG FILTER] Nested field '{field}' filter: {before_count} → {len(filtered_data)} records (nested in suborders)", flush=True)
+            continue
+        
+        # Handle top-level fields (payment_mode, marketplace, order_status, state, city, etc.)
+        if operator == "eq":
+            # Case-insensitive string comparison for string values
+            if isinstance(value, str):
+                before_count = len(filtered_data)
+                filtered_data = [r for r in filtered_data if str(r.get(field, "")).lower() == value.lower()]
+                print(f"[DEBUG FILTER] EQ filter: {before_count} → {len(filtered_data)} records (field={field}, value={value})", flush=True)
+                
+                print(filtered_data)
+                
+                # Show first few actual values for debugging
+                if before_count > 0 and len(filtered_data) == 0:
+                    sample_values = [r.get(field) for r in table[:5]]
+                    print(f"[DEBUG FILTER] Sample values in table: {sample_values}", flush=True)
+            else:
+                filtered_data = [r for r in filtered_data if r.get(field) == value]
+        elif operator == "ne":
+            filtered_data = [r for r in filtered_data if r.get(field) != value]
+        elif operator == "gt":
+            filtered_data = [r for r in filtered_data if r.get(field, 0) > value]
+        elif operator == "lt":
+            filtered_data = [r for r in filtered_data if r.get(field, 0) < value]
+        elif operator == "gte":
+            filtered_data = [r for r in filtered_data if r.get(field, 0) >= value]
+        elif operator == "lte":
+            filtered_data = [r for r in filtered_data if r.get(field, 0) <= value]
+        elif operator == "contains":
+            # Safely handle contains operator - convert both to strings
+            value_str = str(value).lower() if value is not None else ""
+            filtered_data = [r for r in filtered_data if value_str in str(r.get(field, "")).lower()]
+        elif operator == "in":
+            filtered_data = [r for r in filtered_data if r.get(field) in value]
+    
+    return filtered_data
+
+
+def get_statistical_summary(table: pd.DataFrame, field: str) -> dict:
+    """Get comprehensive statistical summary for a numeric field"""
+    try:
+        if table.empty or field not in table.columns:
+            return {
+                'count': 0, 'mean': 0.0, 'median': 0.0, 'std': 0.0,
+                'min': 0.0, 'max': 0.0, 'q25': 0.0, 'q75': 0.0
+            }
+        
+        series = pd.to_numeric(table[field], errors='coerce')
+        clean_series = series.dropna()
+        
+        if len(clean_series) == 0:
+            return {
+                'count': 0, 'mean': 0.0, 'median': 0.0, 'std': 0.0,
+                'min': 0.0, 'max': 0.0, 'q25': 0.0, 'q75': 0.0
+            }
+        
+        stats = {
+            'count': len(clean_series),
+            'mean': round(clean_series.mean(), 2),
+            'median': round(clean_series.median(), 2),
+            'std': round(clean_series.std(), 2),
+            'min': round(clean_series.min(), 2),
+            'max': round(clean_series.max(), 2),
+            'q25': round(clean_series.quantile(0.25), 2),
+            'q75': round(clean_series.quantile(0.75), 2)
+        }
+        return convert_numpy_types(stats)
+    except Exception as e:
+        print(f"Error in calculating statistical summary for {field}: {e}")
+        return None
+
+
+def get_percentile(table: pd.DataFrame, field: str, percentile: float) -> float:
+    """Get specific percentile for a numeric field"""
+    try:
+        if table.empty or field not in table.columns:
+            return 0.0
+        
+        series = pd.to_numeric(table[field], errors='coerce')
+        clean_series = series.dropna()
+        
+        if len(clean_series) == 0:
+            return 0.0
+        
+        result = clean_series.quantile(percentile / 100)
+        final_result = round(result, 2) if not pd.isna(result) else 0.0
+        return convert_numpy_types(final_result)
+    except Exception as e:
+        print(f"Error in calculating {percentile}th percentile for {field}: {e}")
+        return None
+
+
+def get_top_percentile(table: pd.DataFrame, field: str, percentile: float = 95) -> dict:
+    """Get records in top percentile for a field"""
+    try:
+        if table.empty or field not in table.columns:
+            return {
+                'threshold': 0.0, 'count': 0, 'percentage': 0.0, 'total_value': 0.0
+            }
+        
+        series = pd.to_numeric(table[field], errors='coerce')
+        clean_series = series.dropna()
+        
+        if len(clean_series) == 0:
+            return {
+                'threshold': 0.0, 'count': 0, 'percentage': 0.0, 'total_value': 0.0
+            }
+        
+        threshold = clean_series.quantile(percentile / 100)
+        # Use boolean indexing safely
+        mask = series >= threshold
+        top_records = table[mask]
+        
+        if top_records.empty:
+            return {
+                'threshold': round(threshold, 2),
+                'count': 0,
+                'percentage': 0.0,
+                'total_value': 0.0
+            }
+        
+        result = {
+            'threshold': round(threshold, 2),
+            'count': len(top_records),
+            'percentage': round(len(top_records) / len(table) * 100, 2),
+            'total_value': round(pd.to_numeric(top_records[field], errors='coerce').sum(), 2)
+        }
+        return convert_numpy_types(result)
+    except Exception as e:
+        print(f"Error in calculating top {percentile}% for {field}: {e}")
+        return None
+
+
+def get_bottom_percentile(table: pd.DataFrame, field: str, percentile: float = 5) -> dict:
+    """Get records in bottom percentile for a field"""
+    try:
+        if table.empty or field not in table.columns:
+            return {
+                'threshold': 0.0, 'count': 0, 'percentage': 0.0, 'total_value': 0.0
+            }
+        
+        series = pd.to_numeric(table[field], errors='coerce')
+        clean_series = series.dropna()
+        
+        if len(clean_series) == 0:
+            return {
+                'threshold': 0.0, 'count': 0, 'percentage': 0.0, 'total_value': 0.0
+            }
+        
+        threshold = clean_series.quantile(percentile / 100)
+        # Use boolean indexing safely
+        mask = series <= threshold
+        bottom_records = table[mask]
+        
+        if bottom_records.empty:
+            return {
+                'threshold': round(threshold, 2),
+                'count': 0,
+                'percentage': 0.0,
+                'total_value': 0.0
+            }
+        
+        result = {
+            'threshold': round(threshold, 2),
+            'count': len(bottom_records),
+            'percentage': round(len(bottom_records) / len(table) * 100, 2),
+            'total_value': round(pd.to_numeric(bottom_records[field], errors='coerce').sum(), 2)
+        }
+        return convert_numpy_types(result)
+    except Exception as e:
+        print(f"Error in calculating bottom {percentile}% for {field}: {e}")
+        return None
+
+
+def get_correlation_matrix(table: pd.DataFrame, fields: list) -> dict:
+    """Calculate correlation matrix between numeric fields"""
+    try:
+        if table.empty or not fields:
+            return {}
+        
+        # Check if all fields exist in the DataFrame
+        available_fields = [field for field in fields if field in table.columns]
+        
+        if len(available_fields) < 2:
+            return {"error": "At least 2 valid numeric fields required for correlation"}
+        
+        numeric_data = table[available_fields].apply(pd.to_numeric, errors='coerce')
+        # Remove columns that are all NaN
+        numeric_data = numeric_data.dropna(axis=1, how='all')
+        
+        if numeric_data.empty or numeric_data.shape[1] < 2:
+            return {"error": "Insufficient numeric data for correlation calculation"}
+        
+        corr_matrix = numeric_data.corr().round(3)
+        return convert_numpy_types(corr_matrix.to_dict())
+    except Exception as e:
+        print(f"Error in calculating correlation matrix: {e}")
+        return None
+
+
+
 # Tool registry mapping
-TOOL_REGISTRY = {
+ORDERS_TOOL_REGISTRY = {
     "get_all_orders": get_all_orders,
     "apply_filters": apply_filters,  # Enable early filtering optimization
     "get_schema_info": get_schema_info,
@@ -1239,6 +1472,7 @@ TOOL_REGISTRY = {
     "get_aov": get_aov,
     "get_total_revenue": get_total_revenue,
     "get_order_count": get_order_count,
+    "get_cancelled_count": get_cancelled_count,
     "get_order_status_distribution": get_order_status_distribution,
     "get_payment_mode_distribution": get_payment_mode_distribution,
     "get_marketplace_distribution": get_marketplace_distribution,
@@ -1258,3 +1492,98 @@ TOOL_REGISTRY = {
     "get_geographic_insights": get_geographic_insights,
     "get_common_metrics": get_common_metrics,
 }
+
+#queries regarding listing highest / lowest, margin above 30% etc. to  be handled by CustomMetricCalculator()
+PROFIT_TOOL_REGISTRY = {
+    "get_vendor_cost_sheet": get_vendor_cost_sheet,
+    "apply_filters": apply_filters,
+    "get_cost_price": get_cost_price,
+    "get_selling_price": get_selling_price, #current selling price, if price_i is not null
+    "get_gross_profit": get_gross_profit, #selling-cost #for single sku => will get filtered data
+    "get_margin": get_margin, #gp/selling*100 #for single sku => will get filtered data
+    "get_markup": get_markup, #gp/cost
+    "get_cost_to_price_ratio": get_cost_to_price_ratio,
+    "execute_custom_calculation": execute_custom_calculation,  # Dynamic code generation for custom metrics
+    "get_statistical_summary": get_statistical_summary,
+    "get_percentile": get_percentile,
+    "get_top_percentile": get_top_percentile,
+    "get_bottom_percentile": get_bottom_percentile,
+    "get_correlation_matrix": get_correlation_matrix
+}
+
+
+# ------------------ DEPRECATED -------------------
+def _fetch_orders_window(start_date: str, end_date: str, api_key: str, jwt_token: str, base_url: str) -> List[Dict]:
+    """Fetch all orders for a date window with pagination support"""
+    all_orders = []
+    url = f"{base_url}/orders/V2/getAllOrders"
+    
+    params = {
+        "limit": 250,
+        "start_date": start_date,
+        "end_date": end_date
+    }
+    
+    headers = {
+        "x-api-key": api_key,
+        "Authorization": f"Bearer {jwt_token}",
+        "Content-Type": "application/json"
+    }
+    
+    page = 1
+    
+    while True:
+        try:
+            print(f"Fetching page {page} for date range {start_date} to {end_date}")
+            response = requests.get(url, params=params, headers=headers)
+            
+            # Check if we got a 400 Bad Request (end of pagination)
+            if response.status_code == 400:
+                print(f"Reached end of pagination (400 Bad Request) at page {page}")
+                break
+                
+            response.raise_for_status()
+            
+            data = response.json()
+            if data.get("code") != 200 or "data" not in data:
+                print(f"API returned non-200 code or missing data: {data}")
+                break
+            
+            # Extract orders from current page
+            page_orders = data["data"].get("orders", [])
+            if not page_orders:
+                print(f"No orders found on page {page}, ending pagination")
+                break
+                
+            all_orders.extend(page_orders)
+            print(f"Fetched {len(page_orders)} orders from page {page}")
+            
+            # Check for nextUrl to continue pagination
+            next_url = data["data"].get("nextUrl")
+            if not next_url:
+                print(f"No nextUrl found, ending pagination at page {page}")
+                break
+            
+            # Update URL for next request
+            # nextUrl is usually a relative path, so prepend base_url
+            try:
+                if next_url.startswith('/'):
+                    url = f"{base_url}{next_url}"
+                elif next_url.startswith('http'):
+                    url = next_url
+                else:
+                    url = f"{base_url}/{next_url.lstrip('/')}"
+            except Exception as e:
+                print(f"Error processing nextUrl '{next_url}': {e}, ending pagination")
+                break
+            
+            # Clear params for subsequent requests since nextUrl contains all needed parameters
+            params = {}
+            page += 1
+            
+        except requests.exceptions.RequestException as e:
+            print(f"Error fetching orders on page {page}: {e}")
+            break
+    
+    print(f"Total orders fetched for window {start_date} to {end_date}: {len(all_orders)}")
+    return all_orders

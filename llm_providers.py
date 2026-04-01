@@ -90,7 +90,6 @@ class ExecutionPlan(BaseModel):
     base_params: Dict[str, str] = Field(default_factory=dict, description="Base start_date and end_date")
     tool: str = Field(..., description="Primary base tool (usually get_all_orders)")
 
-
 class GeminiLLM:
     """Base class for Gemini calls using the modern Google GenAI SDK"""
 
@@ -138,6 +137,49 @@ class GeminiLLM:
             print(f"[ERROR] Gemini API error: {e}")
             raise
 
+class QueryCategorizationLLM(GeminiLLM):
+    """Query Categorization LLM - understands and categorizes user intent"""
+
+    def invoke(self, query: str) -> dict:
+        prompt = f"""You are an expert at understanding user queries and choosing the correct data source.
+                    
+                    User query: {query}
+
+                    Strictly categorize into ONE of these:
+                    - order
+                    - profit
+
+                    Return **only** the single word: "order" or "profit". No explanation, no quotes, no extra text.
+"""
+
+        try:
+            response_text = self._generate_content(
+                prompt=prompt,
+                response_schema=None,
+                response_mime_type="text/plain",
+                temperature=0.0,
+            )
+
+            # Clean the response
+            if isinstance(response_text, str):
+                cleaned = response_text.strip().lower()
+                if cleaned in ["order", "profit"]:
+                    data_source = cleaned
+                else:
+                    data_source = "order"   # strict fallback
+            else:
+                data_source = "NONE"
+
+            print(f"[CATEGORIZATION] Decided data_source: {data_source}", flush=True)
+
+            return {
+                "success": True,
+                "data_source": data_source 
+            }
+        
+        except Exception as e:
+            print(f"[ERROR] QueryCategorization failed: {e}")
+            return {"success": False, "error": str(e)}
 
 class PlanningLLM(GeminiLLM):
     """Planning LLM - generates execution plan from natural language query"""
@@ -164,17 +206,18 @@ class PlanningLLM(GeminiLLM):
         """Return JSON schema for structured output (can also use ExecutionPlan.model_json_schema())"""
         return ExecutionPlan.model_json_schema()
 
-    def invoke(self, query: str) -> dict:
-        """Generate execution plan from natural language query"""
+    def invoke(self, query: str, data_source: str) -> dict:
+        """Generate execution plan from natural language query, using the correct prompt."""
+        # Default to orders when data_source not provided to maintain backward compatibility
         today = datetime.now()
         current_date = today.strftime("%Y-%m-%d")
         yesterday = today - timedelta(days=1)
         five_days_ago = today - timedelta(days=5)
         thirty_days_ago = today - timedelta(days=30)
 
-        prompt = f""" You are an expert query planning assistant for an e-commerce order management system.
+        order_prompt = f""" You are an expert query planning assistant for an e-commerce order management system.
                     
-                    Today's date is {current_date}.
+                    Today's date is {current_date}. Minimum start date is 2025-09-01.
                     
                     CRITICAL: Always use actual dates in YYYY-MM-DD HH:MM:SS format, never placeholders.
                     - "last 5 days": "{five_days_ago.strftime('%Y-%m-%d')} 00:00:00" to "{today.strftime('%Y-%m-%d')} 23:59:59"
@@ -194,18 +237,19 @@ class PlanningLLM(GeminiLLM):
 
                     QUERY TYPE GUIDELINES:
                     - schema_discovery → use get_schema_info
-                    - metric_analysis → use specific metric tools + convert_to_df when needed
+                    - metric_analysis → use specific metric tools + convert_to_df only when calculating metrics, not otherwise
                     - custom_metric_generation → pass intent to CustomCalculationLLM
                     - comparison → often use get_cod_vs_prepaid_metrics or multiple metric calls
-                    - standard → simple fetch + optional filters
+                    - standard → simple fetch + optional filters, don't convert_to_df
 
                     Prefer built-in metric tools over custom calculation when possible.
                     Use apply_filters early for optimization when specific conditions are mentioned.
+                    After converting to df, the field suborder_sku mentions the sku and the field suborder_model_no is the style name of the footwear.
 
                     Template for generated plan:
                     {{
                     "summarized_query": "4-5 word summary",
-                        "query_type": "metric_analysis|custom_metric_generation|schema_discovery|standard|comparison",
+                        "query_type": "standard|comparison|metric_analysis|custom_metric_generation|schema_discovery",
                     "steps": [
                         {{
                         "id": "step1",
@@ -249,6 +293,18 @@ class PlanningLLM(GeminiLLM):
 
                     FEW-SHOT EXAMPLES:
                     These show exactly how to chain tools for different query types. Copy the structure exactly.
+
+                    Query: "Fetch orders from past week."
+                    {{
+                        "summarized_query": "Fetching orders from past week",
+                        "query_type": "standard",
+                        "steps": [
+                            {{"id": "step1", "tool": "get_all_orders", "params": {{"start_date": "2026-03-11 00:00:00", "end_date": "2026-03-18 23:59:59"}}, "depends_on": [], "save_as": "orders_raw"}},
+                        ],
+                        "manipulation": {{"required": false, "type": null}},
+                        "base_params": {{"start_date": "2026-03-11 00:00:00", "end_date": "2026-03-18 23:59:59"}},
+                        "tool": "get_all_orders"
+                    }}
 
                     Query: "What is the AOV for last 5 days?"
                     {{
@@ -311,13 +367,154 @@ class PlanningLLM(GeminiLLM):
                     Return *only* the JSON object with the structure based on query type.
 """
 
+        profit_prompt = f"""Today's date is {current_date}.
+                
+                CRITICAL: Always use actual dates in YYYY-MM-DD HH:MM:SS format, never placeholders.
+                - "last 5 days": "{five_days_ago.strftime('%Y-%m-%d')} 00:00:00" to "{today.strftime('%Y-%m-%d')} 23:59:59"
+                - "yesterday": "{yesterday.strftime('%Y-%m-%d')} 00:00:00" to "{yesterday.strftime('%Y-%m-%d')} 23:59:59"
+
+                User Query: "{query}"
+
+                Available tools (use these names only):
+                get_vendor_cost_sheet, apply_filters, get_cost_price, get_selling_price, get_gross_profit, get_margin, get_markup, 
+                get_cost_to_price_ratio, execute_custom_calculation, get_statistical_summary, get_percentile, get_top_percentile, 
+                get_bottom_percentile, get_correlation_matrix
+
+                QUERY TYPE GUIDELINES:
+                - schema_discovery → use get_schema_info
+                - metric_analysis → use specific metric tools
+                - custom_metric_generation → use to calculate custom metrics and pass intent to CustomCalculationLLM
+                - comparison → use for comparing metrics or periods
+                - standard → simple fetch + optional filters
+
+                Available Schema for 'vendor_cost_sheet':
+                - "Style Name" (text)
+                - "Collection Name" (text)
+                - "MRP" (number)
+                - "Gender" (text)
+                - "BRAND" (text)
+                - "FACTORY" (text)
+                - "Final price" (number)
+
+                Always fetch vendor cost sheet using get_vendor_cost_sheet first (this is the base data source).
+                Prefer built-in metric tools (get_gross_profit, get_margin, etc.) over custom calculation when possible.
+                Use apply_filters early for optimization when specific conditions (style, vendor, date, etc.) are mentioned.
+
+                Template for generated plan:
+                {{
+                "summarized_query": "4-5 word summary",
+                    "query_type": "standard|comparison|metric_analysis|custom_metric_generation|schema_discovery",
+                "steps": [
+                    {{
+                    "id": "step1",
+                    "tool": "get_vendor_cost_sheet",
+                    "params": {{
+                        "start_date": "2026-03-05 00:00:00",
+                        "end_date": "2026-03-10 23:59:59"
+                    }},
+                    "depends_on": [],
+                    "save_as": "df_raw"
+                    }},
+                    {{
+                    "id": "step2", 
+                    "tool": "apply_filters",
+                    "params": {{
+                        "table": "{{{{df_raw}}}}", "filters": [{{"field": "Style Name", "value": "SAKURA"}}]
+                    }},
+                    "depends_on": ["step1"],
+                    "save_as": "df_filtered_raw"
+                    }},
+                    {{
+                    "id": "step3",
+                    "tool": "get_selling_price",
+                    "params": {{
+                        "table": "{{{{df_filtered_raw}}}}"
+                    }},
+                    "depends_on": ["step2"],
+                    "save_as": "metric_result"
+                    }}
+                ],
+                "manipulation": {{
+                    "required": true|false,
+                    "type": "filter"|null
+                }},
+                "base_params": {{
+                    "start_date": "actual date",
+                    "end_date": "actual date"
+                }},
+                "tool": "get_vendor_cost_sheet"
+                }}
+
+                FEW-SHOT EXAMPLES:
+                These show exactly how to chain tools for different query types. Copy the structure exactly.
+
+                Query: "What is the gross profit from all styles?"
+                {{
+                    "summarized_query": "Gross profits from all styles",
+                    "query_type": "metric_analysis",
+                    "steps": [
+                        {{"id": "step1", "tool": "get_vendor_cost_sheet", "depends_on": [], "save_as": "df"}},
+                        {{"id": "step2", "tool": "get_gross_profit", "params": {{"table": "{{{{df}}}}"}}, "depends_on": ["step1"], "save_as": "profit_result"}}
+                    ],
+                    "manipulation": {{"required": false, "type": null}},
+                    "tool": "get_vendor_cost_sheet"
+                }}
+
+                Query: "Show margin for SAKURA style"
+                {{
+                    "summarized_query": "Margin SAKURA",
+                    "query_type": "metric_analysis",
+                    "steps": [
+                        {{"id": "step1", "tool": "get_vendor_cost_sheet", "depends_on": [], "save_as": "df_raw"}},
+                        {{"id": "step2", "tool": "apply_filters", "params": {{"table": "{{{{df_raw}}}}", "filters": [{{"field": "Style Name", "value": "SAKURA"}}]}}, "depends_on": ["step1"], "save_as": "df_filtered"}},
+                        {{"id": "step3", "tool": "get_margin", "params": {{"table": "{{{{df_filtered}}}}"}}, "depends_on": ["step2"], "save_as": "margin_result"}}
+                    ],
+                    "manipulation": {{"required": true, "type": "filter"}},
+                    "tool": "get_vendor_cost_sheet"
+                }}
+
+                Query: "Markup vs margin for all products last week"
+                {{
+                    "summarized_query": "Markup vs margin comparison",
+                    "query_type": "comparison",
+                    "steps": [
+                        {{"id": "step1", "tool": "get_vendor_cost_sheet", "depends_on": [], "save_as": "df"}},
+                        {{"id": "step2", "tool": "get_markup", "params": {{"table": "{{{{df}}}}"}}, "depends_on": ["step1"], "save_as": "markup_result"}},
+                        {{"id": "step3", "tool": "get_margin", "params": {{"table": "{{{{df}}}}"}}, "depends_on": ["step1"], "save_as": "margin_result"}}
+                    ],
+                    "manipulation": {{"required": false, "type": null}},
+                    "tool": "get_vendor_cost_sheet"
+                }}
+
+                Query: "Custom metric: (selling price - cost price) / cost price * 100 for Cross"
+                {{
+                    "summarized_query": "Custom markup premium products",
+                    "query_type": "custom_metric_generation",
+                    "steps": [
+                        {{"id": "step1", "tool": "get_vendor_cost_sheet", "depends_on": [], "save_as": "df_raw"}},
+                        {{"id": "step2", "tool": "apply_filters", "params": {{"table": "{{{{df_raw}}}}", "filters": [{{"field": "Style Name", "value": "Cross"}}]}}, "depends_on": ["step1"], "save_as": "df_filtered"}},
+                        {{"id": "step3", "tool": "execute_custom_calculation", "params": {{"table": "{{{{df_filtered}}}}", "calculation_code": "result = ((df['selling_price'] - df['cost_price']) / df['cost_price']) * 100"}}, "depends_on": ["step2"], "save_as": "custom_result"}}
+                    ],
+                    "manipulation": {{"required": true, "type": "filter"}},
+                    "tool": "get_vendor_cost_sheet"
+                }}
+
+                Return *only* the JSON object with the structure based on query type.
+    """
+        
+        # Select prompt
+        prompt = ""
+        if data_source == "profit":
+            # print("validating that the data_source in the planning node is actually profit!!!!!!", flush=True)
+            prompt = profit_prompt
+        elif data_source == "order":
+            prompt = order_prompt
+
         try:
-            print(f"[DEBUG] Planning query: {query}")
+            print(f"[DEBUG] Planning query: {query} (prompt_type={data_source})")
 
             response_text = self._generate_content(
                 prompt=prompt,
-                # Gemini structured output rejects schemas that include additionalProperties
-                # (generated by Dict[...] fields), so we parse JSON manually and validate locally.
                 response_schema=None,
                 temperature=0.1,   # Low temperature for consistency
             )
@@ -333,7 +530,7 @@ class PlanningLLM(GeminiLLM):
 
             return {
                 "success": True,
-                "plan": validated_plan.model_dump(),           # or validated_plan.model_dump()
+                "plan": validated_plan.model_dump(),
                 "summarized_query": summarized_query
             }
 
@@ -381,7 +578,7 @@ Extract filter conditions from the query. Return ONLY a valid JSON object with t
 
 CRITICAL RULE: DO NOT create filters for date-related fields (order_date, created_at, etc.)
 Date filtering is already handled by the API call parameters (start_date/end_date).
-Only extract filters for non-date fields like:
+Only extract fers for non-date fields like:
 - sku
 - payment_mode
 - marketplace
@@ -401,7 +598,7 @@ Operators:
 
 Important: Use the EXACT field names and values from the schema above. Pay attention to capitalization and enum values. And, for SKU related queries: An sku 10510-455-7 means, sku 10510-455 of size 7. Hence, if size not mentioned in the sku, use "contains" operator on the sku field always.
 
-Examples:
+Exampleilts:
 - "prepaid orders" → {{"field": "payment_mode", "operator": "eq", "value": "PrePaid"}}
 - "open status" → {{"field": "order_status", "operator": "eq", "value": "Open"}}
 - "from Karnataka" → {{"field": "state", "operator": "eq", "value": "Karnataka"}}
@@ -432,19 +629,41 @@ Return ONLY the JSON, no other text."""
             print(f"Failed to parse filter JSON: {e}\nResponse: {response}")
             return {"filters": []}
 
-
 class GroupingLLM(GeminiLLM):
     """Grouping LLM - extracts comparison groups from query"""
     
     def invoke(self, params: dict) -> dict:
-        """Identify comparison groups"""
-        query = params["query"]
+        """
+        Identify comparison groups based on data source.
         
-        prompt = f"""You are a comparison group extraction assistant for an e-commerce order system.
+        IMPORTANT: The 'data_source' parameter MUST be passed from workflow!
+        Without it, this defaults to "order" mode and will use the order schema,
+        causing incorrect grouping for profit queries.
+        
+        Example wrong behavior (missing data_source):
+        - Query: "compare profit margin between sakura and airflow"
+        - If data_source not passed → defaults to "order" mode
+        - Uses order schema instead of profit schema  
+        - Results in grouping by non-existent fields like "product_name"
+        
+        Example correct behavior (with data_source="profit"):
+        - Query: "compare profit margin between sakura and airflow"  
+        - With data_source="profit" → uses profit schema
+        - Groups by "Style Name" which actually exists in the data
+        
+        Parameters:
+            params['query']: The user query string
+            params['data_source']: REQUIRED - Either "order" or "profit"
+            params['plan']: Optional plan object with additional context
+        """
+        query = params["query"]
+        data_source = params.get("data_source", "order") # Default to order if not specified
+
+        order_prompt = f"""You are a comparison group extraction assistant for an e-commerce order system.
 
 User Query: "{query}"
 
-Your task is to identify what groups are being compared. 
+Your task is to identify what groups are being compared based on the orders data. 
 
 IMPORTANT: The "filters" field contains POST-FETCH filters that will be applied AFTER data is fetched.
 Do NOT include date range parameters (start_date, end_date) in filters - those are fetched first.
@@ -462,7 +681,7 @@ Return ONLY a valid JSON object with this structure:
   ]
 }}
 
-Common comparison dimensions (for filters field):
+Common comparison dimensions for orders (for filters field):
 - Marketplaces: Shopify13, Flipkart, Amazon, Myntra, etc.
 - Payment modes: PrePaid, COD
 - States: Karnataka, Maharashtra, Delhi, Tamil Nadu, etc.
@@ -485,8 +704,80 @@ Response: {{
   ]
 }}
 
+Query: "Compare orders in maharashtra vs telangana"
+Response: {{
+  "groups": [
+    {{"group_id": "maharashtra", "filters": {{"state": "Maharashtra"}}}},
+    {{"group_id": "telangana", "filters": {{"state": "Telangana"}}}}
+  ]
+}}
 Return ONLY the JSON, no other text."""
 
+        profit_prompt = f"""You are a comparison group extraction assistant for a profit/cost analysis system.
+
+User Query: "{query}"
+
+Your task is to identify what groups are being compared based on the vendor cost sheet data.
+
+Available Schema for 'vendor_cost_sheet':
+- "Style Name" (text) - Examples: Grip, Airflow, Trifuse, Path, PLUSH, Lite, NOVA, SAKURA, Cross, etc.
+- "Collection Name" (text) - Examples: AquaPods, GT, Wyld, URBAN ZERO, CHUPPSTER, etc.
+- "MRP" (number)
+- "Gender" (text) - Mens|Womens
+- "BRAND" (text) - always "CHUPPS"
+- "FACTORY" (text)
+- "Final price" (number)
+
+Return ONLY a valid JSON object with this structure:
+{{
+  "groups": [
+    {{
+      "group_id": "descriptive_id",
+      "filters": {{
+        "field_name": "value"
+      }}
+    }}
+  ]
+}}
+
+Common comparison dimensions for profit data (for filters field):
+- Style Name
+- Collection Name
+- Gender
+- BRAND
+- FACTORY
+
+Examples:
+Query: "Compare margin for SAKURA vs Cross"
+Response: {{
+  "groups": [
+    {{"group_id": "sakura", "filters": {{"Style Name": "SAKURA"}}}},
+    {{"group_id": "cross", "filters": {{"Style Name": "Cross"}}}}
+  ]
+}}
+
+Query: "Compare gross profit for Men vs Women"
+Response: {{
+  "groups": [
+    {{"group_id": "men", "filters": {{"Gender": "Men"}}}},
+    {{"group_id": "women", "filters": {{"Gender": "Women"}}}}
+  ]
+}}
+
+Return ONLY the JSON, no other text."""
+
+        # ⚠️  CRITICAL: Select prompt based on data_source parameter
+        # If data_source is NOT passed from workflow.grouping_node, it defaults to "order" 
+        # and will use order_prompt even for profit queries!
+        # This causes the LLM to group by fields from the order schema instead of profit schema,
+        # resulting in non-existent fields like "product_name" being used as grouping dimensions.
+        #
+        # TODO: Consider refactoring to read schemas from prompts_list files:
+        # - prompts_list/profit.txt (already has schema definition)
+        # - prompts_list/orders.txt (if it exists)
+        # This would make schemas DRY and easier to update without touching code.
+        prompt = profit_prompt if data_source == "profit" else order_prompt
+        
         response = self._generate_content(
             prompt=prompt,
             response_schema=None,
@@ -504,8 +795,7 @@ Return ONLY the JSON, no other text."""
             return result
         except json.JSONDecodeError as e:
             print(f"Failed to parse grouping JSON: {e}\nResponse: {response}")
-            return {"groups": []}
-
+            return {{"groups": []}}
 
 class MetricLLM(GeminiLLM):
     """Metric analysis LLM - generates insights from calculated metrics"""
@@ -565,7 +855,6 @@ Example:
             "analysis": response.strip(),
             "metrics_used": list(metrics.keys()) if isinstance(metrics, dict) else []
         }
-
 
 class NewsRetrievalLLM(GeminiLLM):
     """News retrieval LLM - fetches and analyzes relevant news for market context"""
@@ -737,7 +1026,6 @@ Be specific about correlations between news events and your sales data. All mone
         )
         return response.strip()
 
-
 class InsightLLM(GeminiLLM):
     """Insight generation LLM - creates natural language summaries with market context"""
     
@@ -881,7 +1169,6 @@ Make insights actionable and business-focused for footwear e-commerce.
         ]
         return any(keyword in query.lower() for keyword in context_keywords)
 
-
 class CustomCalculationLLM(GeminiLLM):
     """Custom Calculation LLM - generates and iteratively refines Python code for custom metrics using ReAct pattern"""
     
@@ -896,6 +1183,9 @@ class CustomCalculationLLM(GeminiLLM):
         """
         Generate and execute custom Python calculations using ReAct pattern.
         
+        Supports ANY output type: numeric values, dictionaries, lists, and more.
+        The result type depends on the calculation intent and user query.
+        
         Args:
             params: {
                 "query": str,  # Original user query
@@ -905,6 +1195,17 @@ class CustomCalculationLLM(GeminiLLM):
                 "date_range": dict,  # start_date and end_date for context
                 "executor": callable  # Optional: execute_custom_calculation tool function
             }
+        
+        Returns:
+            dict with keys:
+                - success: bool
+                - final_result: any type (number, dict, list, etc.) - the actual calculated result
+                - result_type: str - the type of the result (int, float, dict, list, etc.)
+                - calculation_code: str - the executed Python code
+                - iterations: int - number of ReAct iterations used
+                - intent: str - the original intent
+                - reasoning_history: list - ReAct thought/action/observation sequence
+                - metadata: dict - execution metadata (time, type info, etc.)
         """
         user_query = params.get("query", "")
         intent = params.get("intent", "")
@@ -975,6 +1276,7 @@ class CustomCalculationLLM(GeminiLLM):
                 return {
                     "success": True,
                     "final_result": observation.get("result"),
+                    "result_type": observation.get("metadata", {}).get("result_type", type(observation.get("result")).__name__),
                     "calculation_code": code,
                     "iterations": self.iteration_count,
                     "intent": intent,
@@ -1030,14 +1332,19 @@ class CustomCalculationLLM(GeminiLLM):
             
             # Transform tool result into observation format
             if result.get("success"):
+                result_value = result.get("result")
+                result_type = type(result_value).__name__ if result_value is not None else "NoneType"
+                print(f"[EXECUTE] Result type: {result_type}", flush=True)
+                
                 observation = {
                     "status": "executed",
-                    "result": result.get("result"),  # execute_custom_calculation returns `result`
+                    "result": result_value,
                     "error": None,
                     "metadata": {
                         "execution_time_ms": execution_time,
                         "memory_used_mb": 0,
                         "executor_available": True,
+                        "result_type": result_type,
                         "tool_result": result
                     }
                 }
@@ -1074,6 +1381,9 @@ class CustomCalculationLLM(GeminiLLM):
         
         Returns:
             (is_valid: bool, message: str)
+        
+        Accepts any result type: numeric, dict, list, string, etc.
+        Only validates that result exists and is not NaN/inf.
         """
         if observation.get("error"):
             return False, f"Execution error: {observation['error']}"
@@ -1094,18 +1404,15 @@ class CustomCalculationLLM(GeminiLLM):
                 # Placeholder mode - accept None result
                 return True, "Placeholder result accepted (executor pending)"
         
-        # Type validations based on intent
-        if any(word in intent.lower() for word in ["count", "number", "total"]):
-            if not isinstance(result, (int, float)):
-                return False, f"Expected numeric result, got {type(result)}"
-        
-        # Check for NaN or inf
+        # Check for NaN or inf only for numeric types
         if isinstance(result, float):
             import math
-            if math.isnan(result):
-                return False, "Result is NaN - invalid calculation"
+            if math.isnan(result) or math.isinf(result):
+                return False, "Result is NaN or Inf - invalid calculation"
         
-        return True, "Calculation valid and complete"
+        # Accept any valid result type: int, float, str, dict, list, etc.
+        # The executor will handle type conversion and serialization
+        return True, f"Calculation valid and complete (result type: {type(result).__name__})"
     
     def _format_schema(self, schema: dict) -> str:
         """Format schema information for prompt."""
@@ -1158,7 +1465,11 @@ Think about:
 1. Which columns from the DataFrame are needed?
 2. What transformations or aggregations are required?
 3. What edge cases might exist (nulls, empty data, etc.)?
-4. What should the expected output look like?
+4. What should the expected output look like? (number, dict, list, etc.)
+   - Single metric? → Return a number or string
+   - Multiple metrics? → Return a dictionary
+   - List of items? → Return a list
+   - Grouped data? → Return nested dict or list of dicts
 
 Provide a concise thought process (3-4 sentences max)."""
 
@@ -1196,26 +1507,45 @@ YOUR REASONING FROM PREVIOUS STEP: {thought}
 Available DataFrame Columns and Sample Data:
 {schema_desc}
 
-{history_context}
+Review the errors from history and refine code to avoid errors: {history_context}
+
+You are writing Python code for execution in a restricted environment.
+Available variables:
+- df (pandas DataFrame)
+- pd, np, math, datetime
+
+Rules:
+- DO NOT use any variable not listed above
+- DO NOT assume column names — only use provided schema
+- ALWAYS assign final output to variable `result`
+- DO NOT import anything
+- DO NOT define functions unless necessary
 
 CRITICAL REQUIREMENTS:
 1. Input variable MUST be 'df' (pandas DataFrame). Remember to load input database as pandas df first.
 2. Final result MUST be stored in variable 'result'
-3. Handle edge cases: empty data, null values, type conversions
-4. Use pandas/numpy operations (no loops for large data)
-5. Include data validation (check if df is empty, required columns exist)
-6. Provide clear variable names and comments
-7. Return the calculated metric as a single value or simple dict
-8. DO NOT write any import statements (`import ...` or `from ... import ...`)
-9. Assume `pd`, `np`, `math`, and `datetime` are already available
+3. Result can be ANY type: number, string, dictionary, list, etc. Match the output type to the query intent.
+   - For single metrics: return a number (int/float)
+   - For multiple metrics: return a dictionary {{metric_name: value, ...}}
+   - For lists of items: return a list of dicts or values
+   - For aggregations: return appropriate structure (dict for grouped data, list for rankings, etc.)
+4. Handle edge cases: empty data, null values, type conversions
+5. Use pandas/numpy operations (no loops for large data)
+6. Include data validation (check if df is empty, required columns exist)
+7. Provide clear variable names and comments
 
 CODE STRUCTURE TEMPLATE:
 ```python
 # Result calculation
 if df.empty:
-    result = None  # or handle appropriately
+    result = None  # or empty dict/list as appropriate
 else:
     # Your calculation logic here
+    # Examples:
+    # result = 42.5  # single metric
+    # result = {{"count": 100, "avg": 45.3}}  # multiple metrics
+    # result = [{{name: "A", value: 10}}, {{name: "B", value: 20}}]  # list results
+    # result = {{"category_1": [values], "category_2": [values]}}  # grouped data
     result = <calculated_value>
 ```
 
@@ -1256,6 +1586,9 @@ Generate ONLY the Python code. Start with triple backticks [python]. No explanat
 
 
 #provide RAG business logic to both - Metric & Insight LLM
+
+#instance of each working class
+query_categorization_llm = QueryCategorizationLLM()
 planning_llm = PlanningLLM()
 filtering_llm = FilteringLLM()
 grouping_llm = GroupingLLM()
