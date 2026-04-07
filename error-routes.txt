@@ -1,0 +1,1 @@
+delivered rate, sku-performance matrix === name not visible, fulfillment rate, order value distribution, order velocity, units velocity, geographic concentration, marketplace performance, courier performance, warehouse efficiency, payment mode breakdown, overall fulfillment rate, overall issue rate, payment risk analysis, marketplace risk score

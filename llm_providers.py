@@ -217,7 +217,7 @@ class PlanningLLM(GeminiLLM):
 
         order_prompt = f""" You are an expert query planning assistant for an e-commerce order management system.
                     
-                    Today's date is {current_date}. Minimum start date is 2025-09-01.
+                    Today's date is {current_date}. Earliest start date is 2025-09-01.
                     
                     CRITICAL: Always use actual dates in YYYY-MM-DD HH:MM:SS format, never placeholders.
                     - "last 5 days": "{five_days_ago.strftime('%Y-%m-%d')} 00:00:00" to "{today.strftime('%Y-%m-%d')} 23:59:59"

@@ -1,0 +1,202 @@
+
+# ============ UNIFIED ASYNC KPI ENDPOINT ============
+try:
+    import redis
+except Exception:
+    redis = None
+
+def _redis_keys(request_id: str) -> tuple[str, str]:
+    safe_request_id = "".join(ch for ch in request_id if ch.isalnum() or ch in ("-", "_"))
+    if not safe_request_id:
+        safe_request_id = "unknown"
+    return (f"request_logs:{safe_request_id}:events", f"request_logs:{safe_request_id}:seq")
+
+REDIS_URL = os.getenv('REDIS_URL')
+_redis_client = None
+_redis_init_failed = False
+
+def _get_redis_client() -> Any | None:
+    global _redis_client, _redis_init_failed
+    try:
+        # print("redis url: ", REDIS_URL, flush=True)
+        _redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+        _redis_client.ping()
+        return _redis_client
+    except Exception:
+        _redis_init_failed = True
+        _redis_client = None
+        return None
+
+
+def _make_cache_key(request: HistoryOrdersRequest) -> str:
+    """Generate a consistent cache key based on request parameters."""
+    start = str(request.start_date).strip() if request.start_date else "none"
+    end = str(request.end_date).strip() if request.end_date else "none"
+
+    filters_payload = request.filters if isinstance(request.filters, dict) else {}
+    normalized_filters = convert_numpy_types(filters_payload)
+    filters_serialized = json.dumps(normalized_filters, sort_keys=True, separators=(",", ":"), default=str)
+    filters_hash = hashlib.sha256(filters_serialized.encode("utf-8")).hexdigest()[:16]
+
+    return f"kpi:history:all:{request.table_name}:{start}:{end}:{filters_hash}"
+
+
+def _serialize_for_redis(data: dict) -> str:
+    """Safe JSON serialization that handles numpy types and datetime."""
+    # First convert any numpy/pandas quirks
+    clean_data = convert_numpy_types(data)
+    return json.dumps(clean_data, default=str)  # default=str handles datetime safely
+
+
+@router.post('/history/kpi/all')
+async def kpi_all(request: HistoryOrdersRequest):
+    """
+    Unified KPI endpoint with Redis caching.
+    Cache survives page reloads and serves data instantly on cache hit.
+    """
+    cache_key = _make_cache_key(request)
+    redis_client = _get_redis_client()
+
+    try:
+        print(f"Request started with params: {request.table_name}, {request.start_date}, {request.end_date}", flush=True)
+
+        # === 1. Check Redis Cache ===
+        if redis_client:
+            try:
+                cached = redis_client.get(cache_key)
+                if cached:
+                    print(f"🚀 Cache HIT for key: {cache_key}", flush=True)
+                    cached_response = json.loads(cached)
+                    # Optional: update timestamp on every hit
+                    cached_response['timestamp'] = datetime.now().isoformat()
+                    return cached_response
+            except Exception as cache_err:
+                print(f"Redis get error (non-fatal): {cache_err}", flush=True)
+                # Continue to DB on cache failure
+        else:
+            print("no valid redis client detected", flush=True)
+
+        # === 2. Cache Miss → Fetch from Database ===
+        print("⛔ Cache MISS - Fetching from database...", flush=True)
+        df = fetch_historical_orders(request)
+        print("Fetching complete", flush=True)
+
+        if df.empty:
+            print("df is empty!", flush=True)
+
+        # Your existing KPI calculation functions (unchanged)
+        def calculate_total_orders():
+            if df.empty:
+                return 0
+            return int(df['order_id'].nunique() if 'order_id' in df.columns else len(df))
+
+        def calculate_units_sold():
+            if df.empty:
+                return 0
+            if 'item_quantity' in df.columns:
+                return int(df['item_quantity'].sum())
+            elif 'suborder_quantity' in df.columns:
+                return int(df['suborder_quantity'].sum())
+            else:
+                return int(df['order_quantity'].sum() if 'order_quantity' in df.columns else len(df))
+
+        def calculate_gross_revenue():
+            if df.empty or 'total_amount' not in df.columns:
+                return 0.0
+            return float(df['total_amount'].sum())
+
+        def calculate_aov():
+            if df.empty or 'total_amount' not in df.columns:
+                return 0.0
+            return float(df['total_amount'].mean())
+
+        def calculate_unique_skus():
+            if df.empty or 'sku' not in df.columns:
+                return 0
+            return int(df['sku'].nunique())
+
+        def calculate_cancellation_rate():
+            if df.empty:
+                return 0.0
+            total = _order_count(df)
+            cancelled = _status_order_count(df, {'Cancelled'})
+            return round(_safe_pct(float(cancelled), float(total)), 2)
+
+        def calculate_return_rate():
+            if df.empty:
+                return 0.0
+            total = _order_count(df)
+            returned = _status_order_count(df, {'Returned'})
+            return round(_safe_pct(float(returned), float(total)), 2)
+
+        def calculate_cod_share():
+            if df.empty or 'payment_mode' not in df.columns:
+                return 0.0
+            total = len(df)
+            cod = len(df[df['payment_mode'] == 'COD'])
+            return round((cod / total * 100) if total > 0 else 0.0, 2)
+
+        def calculate_delivered_rate():
+            if df.empty or 'order_status' not in df.columns:
+                return 0.0
+            total = len(df)
+            delivered = len(df[df['order_status'] == 'Delivered'])
+            return round((delivered / total * 100) if total > 0 else 0.0, 2)
+
+        # Run calculations concurrently using thread pool (good for CPU-bound pandas work)
+        loop = asyncio.get_event_loop()
+
+        kpi_tasks = {
+            'totalOrders': loop.run_in_executor(None, calculate_total_orders),
+            'unitsSold': loop.run_in_executor(None, calculate_units_sold),
+            'grossRevenue': loop.run_in_executor(None, calculate_gross_revenue),
+            'aov': loop.run_in_executor(None, calculate_aov),
+            'uniqueSkus': loop.run_in_executor(None, calculate_unique_skus),
+            'cancellationRate': loop.run_in_executor(None, calculate_cancellation_rate),
+            'returnRate': loop.run_in_executor(None, calculate_return_rate),
+            'codShare': loop.run_in_executor(None, calculate_cod_share),
+            'deliveredRate': loop.run_in_executor(None, calculate_delivered_rate),
+        }
+
+        results = {}
+        for key, task in kpi_tasks.items():
+            results[key] = await task
+
+        # Build final response
+        kpi_response = {
+            'success': True,
+            'data': {
+                'totalOrders': {'value': results['totalOrders'], 'unit': 'orders', 'metric_name': 'Total Orders'},
+                'unitsSold': {'value': results['unitsSold'], 'unit': 'units', 'metric_name': 'Units Sold'},
+                'grossRevenue': {'value': results['grossRevenue'], 'unit': 'INR', 'metric_name': 'Gross Revenue'},
+                'aov': {'value': results['aov'], 'unit': 'INR', 'metric_name': 'Average Order Value'},
+                'uniqueSkus': {'value': results['uniqueSkus'], 'unit': 'skus', 'metric_name': 'Unique SKUs'},
+                'cancellationRate': {'value': results['cancellationRate'], 'unit': '%', 'metric_name': 'Cancellation Rate'},
+                'returnRate': {'value': results['returnRate'], 'unit': '%', 'metric_name': 'Return Rate'},
+                'codShare': {'value': results['codShare'], 'unit': '%', 'metric_name': 'COD Share'},
+                'deliveredRate': {'value': results['deliveredRate'], 'unit': '%', 'metric_name': 'Delivered Rate'},
+            },
+            'timestamp': datetime.now().isoformat(),
+            'source': 'database'   # Helpful for debugging
+        }
+
+        final_response = convert_numpy_types(kpi_response)
+
+        # === 3. Store result in Redis (Cache Populate) ===
+        if redis_client:
+            try:
+                redis_client.set(
+                    cache_key,
+                    _serialize_for_redis(final_response),
+                    ex=600,                                 # TTL = 10 minutes (adjust as needed)
+                )
+                print(f"✅ Cache SET for key: {cache_key} (TTL: 10min)", flush=True)
+            except Exception as cache_err:
+                print(f"Redis set error (non-fatal): {cache_err}", flush=True)
+
+        return final_response
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error calculating KPIs: {str(e)}"

@@ -312,6 +312,9 @@ def _project_order_for_dynamodb(
         "order_status": order.get("order_status"),
         "payment_mode": order.get("payment_mode"),
         "order_type": order.get("order_type"),
+        "marketplace": order.get("marketplace"),
+        "courier": order.get("courier"),
+        "import_warehouse_name": order.get("import_warehouse_name"),
         "state": order.get("state"),
         "size": _pick_first_non_empty(
             order.get("size"),

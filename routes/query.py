@@ -1,5 +1,8 @@
 import uuid
 import threading
+import hashlib
+import json
+import os
 import numpy as np
 import pandas as pd
 from decimal import Decimal
@@ -8,6 +11,11 @@ from models import QueryRequest, ExecuteRequest
 from workflow import app as workflow_app, AgentState
 from llm_providers import planning_llm, query_categorization_llm
 from utils.request_log_store import append_request_log, read_request_logs, get_latest_sequence
+
+try:
+    import redis
+except Exception:
+    redis = None
 
 def convert_numpy_types(obj):
     """Recursively convert numpy types and pandas objects to JSON-serializable types"""
@@ -50,9 +58,142 @@ def convert_numpy_types(obj):
 
 router = APIRouter()
 
+# ============ REDIS WORKFLOW CACHING ============
+REDIS_URL = os.getenv('REDIS_URL')
+_redis_client = None
+_redis_init_failed = False
+
+
+def _get_redis_client():
+    """Initialize and return Redis client with graceful failure handling."""
+    global _redis_client, _redis_init_failed
+    if _redis_init_failed:
+        return None
+    try:
+        if _redis_client is None:
+            _redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+            _redis_client.ping()
+        return _redis_client
+    except Exception as e:
+        _redis_init_failed = True
+        _redis_client = None
+        print(f"⚠️  Redis initialization failed (non-fatal): {str(e)}", flush=True)
+        return None
+
+
+def _make_workflow_cache_key(user_query: str) -> str:
+    """Generate cache key from user_query (case-insensitive, whitespace-normalized)."""
+    normalized = user_query.strip().lower()
+    cache_hash = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    return f"workflow:query:{cache_hash}"
+
+
+def _serialize_for_redis(data: dict) -> str:
+    """Safe JSON serialization that handles numpy types and datetime."""
+    clean_data = convert_numpy_types(data)
+    return json.dumps(clean_data, default=str)
+
+
 REQUEST_CANCELLED_ERROR = "Request cancelled by client"
 _QUERY_CANCEL_REGISTRY: dict[str, dict] = {}
 _QUERY_CANCEL_LOCK = threading.Lock()
+
+
+def _construct_cached_response(
+    request_id: str,
+    cached_state: dict,
+    query_type: str = "standard"
+) -> dict:
+    """Construct response from cached state data."""
+    from workflow import get_cached_result
+    
+    response_data = {
+        "success": True,
+        "request_id": request_id,
+        "summarized_query": cached_state.get("summarized_query", ""),
+        "from_cache": True,
+        "query_type": query_type,
+        "logs": read_request_logs(request_id),
+    }
+    
+    # For non-standard queries, retrieve full data from cache
+    if query_type != "standard" and "final_result_ref" in cached_state:
+        try:
+            final_data = get_cached_result(cached_state["final_result_ref"])
+            final_data = convert_numpy_types(final_data)
+            
+            if query_type == "comparison" and isinstance(final_data, dict) and "insights" in final_data:
+                response_data.update({
+                    "insights": final_data["insights"],
+                    "comparison_data": final_data.get("comparison_data"),
+                    "detailed_metrics": final_data.get("detailed_metrics")
+                })
+            elif query_type in ["metric_analysis", "custom_metric_generation"] and isinstance(final_data, dict) and "metrics" in final_data:
+                response_data.update({
+                    "query": final_data.get("query", ""),
+                    "metrics": final_data["metrics"],
+                    "analysis": final_data.get("analysis", final_data.get("insights", "")),
+                    "metrics_calculated": final_data.get("metrics_calculated", []),
+                    "plan": final_data.get("plan", {})
+                })
+            elif query_type == "schema_discovery" and isinstance(final_data, dict):
+                response_data.update(final_data)
+        except Exception as e:
+            print(f"⚠️  Error retrieving cached data for {query_type}: {str(e)}", flush=True)
+    
+    # Add optional fields if available
+    if "insights" in cached_state:
+        response_data["insights"] = cached_state["insights"]
+    if "metrics_calculated" in cached_state:
+        response_data["metrics_calculated"] = cached_state["metrics_calculated"]
+    if "comparison_results" in cached_state:
+        response_data["comparison_results"] = cached_state["comparison_results"]
+    
+    return convert_numpy_types(response_data)
+
+
+def _cache_workflow_result(
+    user_query: str,
+    result: dict,
+    query_type: str = "standard",
+    final_result_ref: str | None = None,
+) -> None:
+    """Cache workflow result selectively based on query_type."""
+    redis_client = _get_redis_client()
+    if not redis_client:
+        return
+    
+    try:
+        cache_key = _make_workflow_cache_key(user_query)
+        
+        # Always cache: metadata
+        cached_state = {
+            "user_query": user_query,
+            "query_type": query_type,
+            "plan": result.get("plan"),
+            "summarized_query": result.get("summarized_query"),
+            "insights": result.get("insights"),
+            "metrics_calculated": result.get("metrics_calculated"),
+            "comparison_results": result.get("comparison_results"),
+        }
+        
+        # Conditionally cache final_result_ref (data) only for non-standard queries
+        if query_type != "standard" and final_result_ref:
+            cached_state["final_result_ref"] = final_result_ref
+            print(f"💾 Caching full {query_type} result to Redis", flush=True)
+        else:
+            print(f"💾 Caching plan only (skipping data for {query_type} query)", flush=True)
+        
+        # Store to Redis with TTL of 10 minutes
+        redis_client.set(
+            cache_key,
+            _serialize_for_redis(cached_state),
+            ex=600  # TTL = 10 minutes
+        )
+        print(f"✅ Workflow cached successfully with TTL 600s", flush=True)
+    except Exception as cache_err:
+        print(f"⚠️  Redis set error (non-fatal): {cache_err}", flush=True)
+
 
 
 def register_active_query(request_id: str) -> None:
@@ -200,6 +341,55 @@ async def _run_workflow_request(
             "error": REQUEST_CANCELLED_ERROR,
             "logs": read_request_logs(request_id),
         }
+
+    # ============ CACHE CHECK ============
+    cache_key = _make_workflow_cache_key(user_query)
+    redis_client = _get_redis_client()
+    
+    if redis_client:
+        try:
+            cached_data = redis_client.get(cache_key)
+            if cached_data:
+                print(f"🚀 WORKFLOW CACHE HIT for query: {user_query[:60]}...", flush=True)
+                append_request_log(
+                    request_id=request_id,
+                    step_key="CACHE_HIT",
+                    summary="Workflow found in Redis cache",
+                    status="INFO"
+                )
+                
+                cached_state = json.loads(cached_data)
+                query_type = cached_state.get("query_type", "standard")
+                
+                # For non-standard queries: return fully from cache
+                if query_type != "standard":
+                    print(f"✅ Returning full cached result for {query_type} query", flush=True)
+                    append_request_log(
+                        request_id=request_id,
+                        step_key="CACHE_FULL_HIT",
+                        summary=f"Complete {query_type} query result from cache",
+                        status="COMPLETE"
+                    )
+                    clear_query_registry_entry(request_id)
+                    return _construct_cached_response(request_id, cached_state, query_type)
+                
+                # For standard queries: use cached plan to skip planning LLM
+                else:
+                    print(f"📋 Using cached plan for standard query, will re-fetch fresh data", flush=True)
+                    append_request_log(
+                        request_id=request_id,
+                        step_key="CACHE_PLAN_HIT",
+                        summary="Using cached plan (will re-fetch data)",
+                        status="INFO"
+                    )
+                    precomputed_plan = cached_state.get("plan")
+                    summarized_query = cached_state.get("summarized_query") or user_query[:120]
+                    # Continue with workflow using cached plan
+        except Exception as cache_err:
+            print(f"⚠️  Redis get error (non-fatal, continuing without cache): {cache_err}", flush=True)
+            # Continue to normal workflow execution
+    else:
+        print("ℹ️  Redis client unavailable, caching disabled", flush=True)
 
     try:
         async def workflow_logger(
@@ -421,6 +611,12 @@ async def _run_workflow_request(
                 print(f"returning response_data keys: {list(response_data.keys())}", flush=True)
                 # Convert all numpy types in response data to JSON-serializable types
                 response_data = convert_numpy_types(response_data)
+                
+                # ============ CACHE RESULT ============
+                query_type = result.get("plan", {}).get("query_type", "standard")
+                final_result_ref = result.get("final_result_ref")
+                _cache_workflow_result(user_query, result, query_type, final_result_ref)
+                
                 return response_data
             except Exception as return_error:
                 print(f"error in return statement: {return_error}", flush=True)
@@ -458,6 +654,10 @@ async def _run_workflow_request(
 
                     # Convert the entire response data as well
                     response_data = convert_numpy_types(response_data)
+
+                    # ============ CACHE RESULT (FALLBACK PATH) ============
+                    query_type = result.get("plan", {}).get("query_type", "standard")
+                    _cache_workflow_result(user_query, result, query_type, last_result_ref)
 
                     print("fallback successful", flush=True)
                     return response_data

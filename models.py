@@ -1,8 +1,66 @@
 from datetime import datetime
 import ast
 import json
+from enum import Enum
 from pydantic import BaseModel, Field, field_validator
 from typing import List, Dict, Any, Optional
+
+
+# ============ ENUM TYPES FOR ORDER DATA ============
+class OrderStatus(str, Enum):
+    """Order fulfillment status values"""
+    ORDER_CONFIRMED = "Confirmed"
+    DELIVERED = "Shipped"
+    SHIPPING_START = "Manifest Scanned"
+    CANCELLED = "Cancelled"
+    ORDER_PENDING = "Open"
+    RETURNED = "Returned"
+    
+    @classmethod
+    def normalize(cls, value: str) -> Optional[str]:
+        """Normalize user input to enum value with case-insensitive matching"""
+        if not value:
+            return None
+        value_upper = str(value).strip().upper()
+        for member in cls:
+            if member.value.upper() == value_upper:
+                return member.value
+        return value  # Return original if not found
+
+
+class PaymentMode(str, Enum):
+    """Payment mode options"""
+    COD = "COD"
+    PREPAID = "PrePaid"
+    
+    @classmethod
+    def normalize(cls, value: str) -> Optional[str]:
+        """Normalize user input to enum value with case-insensitive matching"""
+        if not value:
+            return None
+        value_upper = str(value).strip().upper()
+        for member in cls:
+            if member.value.upper() == value_upper:
+                return member.value
+        return value  # Return original if not found
+
+
+class OrderType(str, Enum):
+    """Order type classification"""
+    B2B = "B2B"
+    B2C = "B2C"
+    B2B2C = "B2B2C"
+    
+    @classmethod
+    def normalize(cls, value: str) -> Optional[str]:
+        """Normalize user input to enum value with case-insensitive matching"""
+        if not value:
+            return None
+        value_upper = str(value).strip().upper()
+        for member in cls:
+            if member.value.upper() == value_upper:
+                return member.value
+        return value  # Return original if not found
 
 
 def _default_end_date() -> str:
@@ -34,8 +92,8 @@ class GeographyRequest(BaseModel):
 class HistoryOrdersRequest(BaseModel):
     """Request model for historical orders queries from DyanmoDB"""
     table_name: str = "history-orders"
-    start_date: str = Field(default_factory=_default_start_date)
-    end_date: str = Field(default_factory=_default_end_date)
+    start_date: str
+    end_date: str
     filters: Optional[Dict[str, Any]] = None
 
     @field_validator("start_date", "end_date", mode="before")
