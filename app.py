@@ -73,8 +73,6 @@ app = FastAPI(
     version="1.0.0"
 )
 
-
-@app.on_event("startup")
 async def startup_event():
     """Print startup banner once when the application starts."""
     host = os.getenv('HOST', '0.0.0.0')

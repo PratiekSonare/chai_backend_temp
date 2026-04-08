@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 DEFAULT_BASE_URL = "https://api.easyecom.io"
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M:%S"
-DEFAULT_DYNAMODB_TABLE = "history-orders-latest"
+DEFAULT_DYNAMODB_TABLE = "history-orders-latest-4"
 DEFAULT_AWS_REGION = "ap-south-1"
 PRIMARY_KEY_FIELD = "invoice_id"
 DEFAULT_DDB_BATCH_SIZE = 25
@@ -34,6 +34,7 @@ REQUIRED_COLUMNS = [
     "canonical_sku",
     "suborder_sku",
     "suborder_marketplace_sku",
+    "suborder_model_no",
     "marketplace_sku",
     "order_status",
     "payment_mode",
@@ -194,12 +195,14 @@ def _project_order_for_dynamodb(
             order.get("sku"),
             first_sub.get("sku"),
         ),
+        "suborder_model_no": _pick_first_non_empty(
+            first_sub.get("model_no"),
+        ),
         "suborder_sku": _pick_first_non_empty(
             order.get("suborder_sku"),
             first_sub.get("sku"),
         ),
         "suborder_marketplace_sku": _pick_first_non_empty(
-            order.get("suborder_marketplace_sku"),
             first_sub.get("marketplace_sku"),
         ),
         "marketplace_sku": _pick_first_non_empty(

@@ -1596,6 +1596,29 @@ def _resolve_granularity(requested: Optional[str], min_date: pd.Timestamp, max_d
     return 'monthly'
 
 
+def _calculate_growth_rates(values: list) -> list:
+    """
+    Calculate percentage growth for each value compared to the previous value.
+    First value will have None growth rate (no previous value to compare).
+    
+    Formula: ((Current - Previous) / Previous) * 100
+    """
+    growth_rates = []
+    for i, value in enumerate(values):
+        if i == 0:
+            growth_rates.append(None)  # No previous value for first data point
+        else:
+            prev_value = values[i - 1]
+            if prev_value == 0:
+                # If previous value is 0, growth is infinite or undefined
+                # Set to 0 if current is also 0, else set to None
+                growth_rates.append(0 if value == 0 else None)
+            else:
+                growth_percent = ((value - prev_value) / prev_value) * 100
+                growth_rates.append(round(growth_percent, 2))
+    return growth_rates
+
+
 def _build_time_groups(df: pd.DataFrame, requested_granularity: Optional[str] = None):
     if 'order_date' not in df.columns:
         raise HTTPException(status_code=400, detail="order_date column is required")
@@ -4332,18 +4355,32 @@ async def batch_all_metrics(request: HistoryOrdersRequest):
             # Total Orders Chart Data
             if not grouped_df.empty and 'order_id' in grouped_df.columns:
                 orders_by_date = grouped_df.groupby(group_col)['order_id'].nunique().sort_index()
+                orders_list = orders_by_date.tolist()
+                growth_rates = _calculate_growth_rates(orders_list)
                 chart_data_orders = [
-                    {"date": label, "totalOrders": int(value)}
-                    for label, value in zip(labels, orders_by_date.tolist())
+                    {
+                        "date": label, 
+                        "totalOrders": int(value),
+                        "growth": growth,
+                        "count": int(value)
+                    }
+                    for label, value, growth in zip(labels, orders_list, growth_rates)
                 ]
                 primaryKpis['totalOrders']['chart'] = chart_data_orders
             
             # Gross Revenue Chart Data
             if not grouped_df.empty and 'total_amount' in grouped_df.columns:
                 revenue_by_date = grouped_df.groupby(group_col)['total_amount'].sum().sort_index()
+                revenue_list = revenue_by_date.tolist()
+                growth_rates = _calculate_growth_rates(revenue_list)
                 chart_data_revenue = [
-                    {"date": label, "grossRevenue": float(value)}
-                    for label, value in zip(labels, revenue_by_date.tolist())
+                    {
+                        "date": label, 
+                        "grossRevenue": float(value),
+                        "growth": growth,
+                        "revenue": float(value)
+                    }
+                    for label, value, growth in zip(labels, revenue_list, growth_rates)
                 ]
                 primaryKpis['grossRevenue']['chart'] = chart_data_revenue
         except Exception as e:

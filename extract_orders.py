@@ -25,7 +25,7 @@ DEFAULT_PREFIX = "orders"
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M:%S"
 DEFAULT_AWS_REGION = "ap-south-1"
-DEFAULT_DYNAMODB_TABLE = "history-orders"
+DEFAULT_DYNAMODB_TABLE = "history-order-table-2"
 PRIMARY_KEY_FIELD = "invoice_id"
 DEFAULT_DDB_BATCH_SIZE = 25
 REQUIRED_COLUMNS = [
@@ -39,6 +39,7 @@ REQUIRED_COLUMNS = [
     "canonical_sku",
     "suborder_sku",
     "suborder_marketplace_sku",
+    "suborder_model_no",
     "marketplace_sku",
     "order_status",
     "payment_mode",
@@ -287,6 +288,10 @@ def _project_order_for_dynamodb(
         "item_quantity": _pick_first_non_empty(
             order.get("item_quantity"),
             first_sub.get("item_quantity"),
+        ),
+        "suborder_model_no": _pick_first_non_empty(
+            order.get("suborder_model_no"),
+            first_sub.get("suborder_model_no"),
         ),
         "suborder_quantity": _pick_first_non_empty(
             order.get("suborder_quantity"),
