@@ -1493,6 +1493,254 @@ ORDERS_TOOL_REGISTRY = {
     "get_common_metrics": get_common_metrics,
 }
 
+# ===================================================================
+# PAYMENT CYCLE TOOLS
+# ===================================================================
+def get_payment_cycle_data(distributor_name: str = None) -> List[Dict]:
+    """
+    Fetch payment cycle and cash discount data from Supabase.
+    
+    Args:
+        distributor_name: Optional filter for specific distributor
+    
+    Returns:
+        List of distributor payment cycle records with fields:
+        - PARTY NAME (distributor name)
+        - MARGIN (margin %)
+        - CD (cash discount %)
+        - PAYMENT CYCLE (days)
+        - ASM NAME
+        - REMARK
+    """
+    if not supabase:
+        raise ValueError("Supabase client not initialized. Check SUPABASE_URL and SUPABASE_KEY.")
+    
+    try:
+        query = supabase.table("payment_cycle_and_cash_discount").select("*")
+        
+        # Apply optional filter
+        if distributor_name:
+            query = query.eq("PARTY NAME", distributor_name)
+        
+        response = query.execute()
+        data: List[Dict] = response.data
+        
+        if not data:
+            print("Warning: payment_cycle_and_cash_discount returned no data.")
+        
+        return data
+    
+    except Exception as e:
+        print(f"Error fetching payment cycle data: {e}")
+        raise
+
+def get_avg_margin(table: Union[pd.DataFrame, list]) -> Optional[float]:
+    """
+    Calculate average margin across all distributors.
+    
+    Returns the arithmetic mean of MARGIN field.
+    """
+    df = _ensure_dataframe(table)
+    if df.empty or "MARGIN" not in df.columns:
+        return None
+    
+    margins = pd.to_numeric(df["MARGIN"], errors='coerce').dropna()
+    if len(margins) == 0:
+        return None
+    
+    return round(float(margins.mean()), 2)
+
+def get_weighted_avg_margin(table: Union[pd.DataFrame, list], volume_column: str = None) -> Optional[float]:
+    """
+    Calculate weighted average margin using sales volume if available.
+    
+    Formula: SUM(margin × volume) / SUM(volume)
+    Falls back to simple average if volume_column not available or not provided.
+    """
+    df = _ensure_dataframe(table)
+    if df.empty or "MARGIN" not in df.columns:
+        return None
+    
+    margins = pd.to_numeric(df["MARGIN"], errors='coerce')
+    
+    # If volume column provided and exists, use weighted average
+    if volume_column and volume_column in df.columns:
+        try:
+            volumes = pd.to_numeric(df[volume_column], errors='coerce')
+            weighted_sum = (margins * volumes).sum()
+            total_volume = volumes.sum()
+            
+            if total_volume == 0:
+                return None
+            
+            return round(float(weighted_sum / total_volume), 2)
+        except Exception:
+            # Fall back to simple average if weighting fails
+            pass
+    
+    # Simple average fallback
+    clean_margins = margins.dropna()
+    if len(clean_margins) == 0:
+        return None
+    
+    return round(float(clean_margins.mean()), 2)
+
+def get_margin_per_payment_day(table: Union[pd.DataFrame, list]) -> Optional[float]:
+    """
+    Calculate efficiency score: Average Margin per Payment Day.
+    
+    Formula: AVG(margin / payment_cycle_days)
+    Higher score = better efficiency (higher margin, shorter cycle)
+    """
+    df = _ensure_dataframe(table)
+    if df.empty or "MARGIN" not in df.columns or "PAYMENT CYCLE" not in df.columns:
+        return None
+    
+    margins = pd.to_numeric(df["MARGIN"], errors='coerce')
+    cycles = pd.to_numeric(df["PAYMENT CYCLE"], errors='coerce')
+    
+    # Avoid division by zero
+    mask = cycles > 0
+    if not mask.any():
+        return None
+    
+    efficiency = (margins[mask] / cycles[mask]).mean()
+    return round(float(efficiency), 4) if not pd.isna(efficiency) else None
+
+def get_total_margin_exposure(table: Union[pd.DataFrame, list], avg_monthly_sales_column: str = None) -> Optional[float]:
+    """
+    Calculate total margin exposure: SUM(margin × estimated_monthly_sales).
+    
+    This represents credit risk from high-margin distributors.
+    If sales_column not provided, estimates using order count as proxy.
+    """
+    df = _ensure_dataframe(table)
+    if df.empty or "MARGIN" not in df.columns:
+        return None
+    
+    margins = pd.to_numeric(df["MARGIN"], errors='coerce')
+    
+    # Use provided sales column or estimate
+    if avg_monthly_sales_column and avg_monthly_sales_column in df.columns:
+        sales = pd.to_numeric(df[avg_monthly_sales_column], errors='coerce')
+    else:
+        # Estimate: uniform distribution
+        sales = pd.Series([1.0] * len(df))
+    
+    exposure = (margins * sales).sum()
+    return round(float(exposure), 2) if not pd.isna(exposure) else None
+
+def get_high_risk_distributors(table: Union[pd.DataFrame, list], margin_threshold: float = 30, cycle_threshold: int = 45) -> List[Dict]:
+    """
+    Identify high-risk distributors: margin > threshold AND payment_cycle > threshold.
+    
+    Args:
+        table: Distributor records
+        margin_threshold: Minimum margin % to flag (default: 30%)
+        cycle_threshold: Maximum payment days before flagged as risky (default: 45)
+    
+    Returns:
+        List of high-risk distributor records with fields:
+        - PARTY NAME
+        - MARGIN
+        - PAYMENT CYCLE
+        - CD (cash discount)
+        - Risk score (calculated)
+    """
+    df = _ensure_dataframe(table)
+    if df.empty or "MARGIN" not in df.columns or "PAYMENT CYCLE" not in df.columns:
+        return []
+    
+    margins = pd.to_numeric(df["MARGIN"], errors='coerce')
+    cycles = pd.to_numeric(df["PAYMENT CYCLE"], errors='coerce')
+    
+    # Identify high-risk: high margin + long payment cycle
+    high_risk_mask = (margins > margin_threshold) & (cycles > cycle_threshold)
+    
+    if not high_risk_mask.any():
+        return []
+    
+    high_risk_df = df[high_risk_mask].copy()
+    
+    # Calculate risk score (higher = riskier)
+    high_risk_df["risk_score"] = (
+        (pd.to_numeric(high_risk_df["MARGIN"], errors='coerce') / 100) * 
+        (pd.to_numeric(high_risk_df["PAYMENT CYCLE"], errors='coerce') / 45)
+    ).round(3)
+    
+    # Sort by risk score descending
+    high_risk_df = high_risk_df.sort_values("risk_score", ascending=False)
+    
+    return high_risk_df[["PARTY NAME", "MARGIN", "PAYMENT CYCLE", "CD", "risk_score"]].to_dict('records')
+
+def get_cycle_efficiency_score(table: Union[pd.DataFrame, list]) -> Optional[float]:
+    """
+    Calculate cycle efficiency score for portfolio.
+    
+    Formula: AVG((100 - margin) / payment_cycle_days)
+    Lower margin + shorter cycle = lower score = better efficiency for you
+    This inverts traditional logic: you want low scores (low margin exposure, fast turnaround)
+    """
+    df = _ensure_dataframe(table)
+    if df.empty or "MARGIN" not in df.columns or "PAYMENT CYCLE" not in df.columns:
+        return None
+    
+    margins = pd.to_numeric(df["MARGIN"], errors='coerce')
+    cycles = pd.to_numeric(df["PAYMENT CYCLE"], errors='coerce')
+    
+    # Avoid division by zero
+    mask = cycles > 0
+    if not mask.any():
+        return None
+    
+    # (100 - margin) / cycle: lower is better
+    efficiency = ((100 - margins[mask]) / cycles[mask]).mean()
+    return round(float(efficiency), 4) if not pd.isna(efficiency) else None
+
+def get_payment_cycle_distribution(table: Union[pd.DataFrame, list]) -> dict:
+    """
+    Get distribution of payment cycles (grouped by day ranges).
+    
+    Returns counts by cycle ranges: <15 days, 15-30 days, 30-45 days, >45 days
+    """
+    df = _ensure_dataframe(table)
+    if df.empty or "PAYMENT CYCLE" not in df.columns:
+        return {}
+    
+    cycles = pd.to_numeric(df["PAYMENT CYCLE"], errors='coerce')
+    
+    distribution = {
+        "very_short_cycle_0_15": int(((cycles >= 0) & (cycles < 15)).sum()),
+        "short_cycle_15_30": int(((cycles >= 15) & (cycles < 30)).sum()),
+        "medium_cycle_30_45": int(((cycles >= 30) & (cycles < 45)).sum()),
+        "long_cycle_45plus": int((cycles >= 45).sum())
+    }
+    
+    return distribution
+
+def get_cash_discount_stats(table: Union[pd.DataFrame, list]) -> dict:
+    """
+    Calculate statistics for cash discount (CD) field.
+    
+    Returns: sum, mean, max, min, count of non-null CD values
+    """
+    df = _ensure_dataframe(table)
+    if df.empty or "CD" not in df.columns:
+        return {"sum": 0.0, "mean": 0.0, "max": 0.0, "min": 0.0, "count": 0}
+    
+    cds = pd.to_numeric(df["CD"], errors='coerce').dropna()
+    
+    if len(cds) == 0:
+        return {"sum": 0.0, "mean": 0.0, "max": 0.0, "min": 0.0, "count": 0}
+    
+    return {
+        "sum": round(float(cds.sum()), 2),
+        "mean": round(float(cds.mean()), 2),
+        "max": round(float(cds.max()), 2),
+        "min": round(float(cds.min()), 2),
+        "count": len(cds)
+    }
+
 #queries regarding listing highest / lowest, margin above 30% etc. to  be handled by CustomMetricCalculator()
 PROFIT_TOOL_REGISTRY = {
     "get_vendor_cost_sheet": get_vendor_cost_sheet,
@@ -1509,6 +1757,23 @@ PROFIT_TOOL_REGISTRY = {
     "get_top_percentile": get_top_percentile,
     "get_bottom_percentile": get_bottom_percentile,
     "get_correlation_matrix": get_correlation_matrix
+}
+
+PAYMENT_CYCLE_TOOL_REGISTRY = {
+    "get_payment_cycle_data": get_payment_cycle_data,
+    "apply_filters": apply_filters,
+    "get_avg_margin": get_avg_margin,
+    "get_weighted_avg_margin": get_weighted_avg_margin,
+    "get_margin_per_payment_day": get_margin_per_payment_day,
+    "get_total_margin_exposure": get_total_margin_exposure,
+    "get_high_risk_distributors": get_high_risk_distributors,
+    "get_cycle_efficiency_score": get_cycle_efficiency_score,
+    "get_payment_cycle_distribution": get_payment_cycle_distribution,
+    "get_cash_discount_stats": get_cash_discount_stats,
+    "execute_custom_calculation": execute_custom_calculation,
+    "get_schema_info": get_schema_info,
+    "get_statistical_summary": get_statistical_summary,
+    "get_percentile": get_percentile,
 }
 
 

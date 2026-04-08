@@ -8,7 +8,7 @@ import uuid
 
 # Import tools and LLM providers
 from tools import apply_filters, get_gross_profit, get_margin, get_markup, get_cost_price, get_selling_price, get_cost_to_price_ratio
-from tools import ORDERS_TOOL_REGISTRY, PROFIT_TOOL_REGISTRY
+from tools import ORDERS_TOOL_REGISTRY, PROFIT_TOOL_REGISTRY, PAYMENT_CYCLE_TOOL_REGISTRY
 from llm_providers import query_categorization_llm, planning_llm, filtering_llm, grouping_llm, insight_llm, custom_calculation_llm
 
 # State schema
@@ -318,6 +318,8 @@ async def query_categorization_node(state: AgentState) -> AgentState:
                 TOOL_REGISTRY = ORDERS_TOOL_REGISTRY
             elif data_source == "profit":
                 TOOL_REGISTRY = PROFIT_TOOL_REGISTRY
+            elif data_source == "payment_cycle":
+                TOOL_REGISTRY = PAYMENT_CYCLE_TOOL_REGISTRY
         except Exception:
             # Fallback to orders registry in case of any issue
             TOOL_REGISTRY = ORDERS_TOOL_REGISTRY
@@ -1185,6 +1187,63 @@ def aggregation_node(state: AgentState) -> AgentState:
             print(f"❌ [AGGREGATION] Profit Error: {str(e)}", flush=True)
             return {**state, "error": f"Profit aggregation error: {str(e)}"}
     
+    elif data_source == "payment_cycle":
+        try:
+            aggregated_metrics = {}
+            
+            for group_id, result_ref in state["group_results"].items():
+                data = get_cached_result(result_ref)
+                
+                # Ensure data is always a list for uniform processing
+                if not isinstance(data, list):
+                    data = [data] if data else []
+                
+                # Helper to safely get numeric value from record
+                def safe_float(value, default=0.0):
+                    try:
+                        if value is None or value == "" or value == "None":
+                            return default
+                        return float(value)
+                    except (ValueError, TypeError):
+                        return default
+                
+                # Import payment cycle tools
+                from tools import (
+                    get_avg_margin, get_weighted_avg_margin, get_margin_per_payment_day,
+                    get_total_margin_exposure, get_high_risk_distributors, get_cycle_efficiency_score,
+                    get_payment_cycle_distribution, get_cash_discount_stats
+                )
+                
+                df_data = pd.DataFrame(data) if data else pd.DataFrame()
+                
+                # Calculate payment cycle metrics
+                metrics = {
+                    "distributor_count": len(data),
+                    "avg_margin": get_avg_margin(data),
+                    "margin_per_payment_day": get_margin_per_payment_day(data),
+                    "cycle_efficiency_score": get_cycle_efficiency_score(data),
+                    "total_margin_exposure": get_total_margin_exposure(data),
+                    "payment_cycle_distribution": get_payment_cycle_distribution(data),
+                    "cash_discount_stats": get_cash_discount_stats(data),
+                    "high_risk_distributors": get_high_risk_distributors(data),
+                }
+                
+                aggregated_metrics[group_id] = metrics
+            
+            print(f"✅ [AGGREGATION] Payment cycle metrics computed for: {list(aggregated_metrics.keys())}", flush=True)
+            
+            return {
+                **state,
+                "aggregated_metrics": aggregated_metrics,
+                "error": None
+            }
+            
+        except Exception as e:
+            print(f"❌ [AGGREGATION] Payment Cycle Error: {str(e)}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return {**state, "error": f"Payment cycle aggregation error: {str(e)}"}
+    
     else:
         # Fallback for unknown data_source
         return {**state, "error": f"Unsupported data_source: {data_source}"}
@@ -1432,6 +1491,102 @@ def comparison_node(state: AgentState) -> AgentState:
                 "comparison_results": comparison_results,
                 "error": None
             }
+        
+        # ====================== PAYMENT CYCLE COMPARISON ======================
+        elif data_source == "payment_cycle":
+            comparison_results = {
+                "comparison_type": "pairwise" if num_groups == 2 else "multi_group",
+                "comparison_mode": True,
+                "comparison_param": state.get("comparison_param"),
+                "data_source": "payment_cycle",
+                "num_groups": num_groups,
+                "groups": group_ids,
+            }
+            
+            if num_groups == 2:
+                # Pairwise comparison
+                group_a, group_b = group_ids[0], group_ids[1]
+                metrics_a = metrics[group_a]
+                metrics_b = metrics[group_b]
+                
+                comparison_results.update({
+                    "groups": {"a": group_a, "b": group_b},
+                    "distributor_count": {
+                        "a": metrics_a.get("distributor_count", 0),
+                        "b": metrics_b.get("distributor_count", 0),
+                        "diff": metrics_b.get("distributor_count", 0) - metrics_a.get("distributor_count", 0),
+                    },
+                    "avg_margin": {
+                        "a": metrics_a.get("avg_margin", 0),
+                        "b": metrics_b.get("avg_margin", 0),
+                        "diff": round(metrics_b.get("avg_margin", 0) - metrics_a.get("avg_margin", 0), 2),
+                    },
+                    "margin_per_payment_day": {
+                        "a": metrics_a.get("margin_per_payment_day", 0),
+                        "b": metrics_b.get("margin_per_payment_day", 0),
+                        "diff": round(metrics_b.get("margin_per_payment_day", 0) - metrics_a.get("margin_per_payment_day", 0), 4),
+                    },
+                    "cycle_efficiency_score": {
+                        "a": metrics_a.get("cycle_efficiency_score", 0),
+                        "b": metrics_b.get("cycle_efficiency_score", 0),
+                        "diff": round(metrics_b.get("cycle_efficiency_score", 0) - metrics_a.get("cycle_efficiency_score", 0), 4),
+                    },
+                    "total_margin_exposure": {
+                        "a": metrics_a.get("total_margin_exposure", 0),
+                        "b": metrics_b.get("total_margin_exposure", 0),
+                        "diff": round(metrics_b.get("total_margin_exposure", 0) - metrics_a.get("total_margin_exposure", 0), 2),
+                    },
+                    "high_risk_count": {
+                        "a": len(metrics_a.get("high_risk_distributors", [])),
+                        "b": len(metrics_b.get("high_risk_distributors", [])),
+                        "diff": len(metrics_b.get("high_risk_distributors", [])) - len(metrics_a.get("high_risk_distributors", [])),
+                    },
+                    "winner_by_margin": group_a if metrics_a.get("avg_margin", 0) > metrics_b.get("avg_margin", 0) else group_b,
+                    "winner_by_efficiency": group_a if metrics_a.get("margin_per_payment_day", 0) > metrics_b.get("margin_per_payment_day", 0) else group_b,
+                    "lower_risk_group": group_a if len(metrics_a.get("high_risk_distributors", [])) < len(metrics_b.get("high_risk_distributors", [])) else group_b,
+                })
+                
+                print(f"✅ [COMPARISON] Payment Cycle: {group_a} vs {group_b} | "
+                      f"Margin Winner: {comparison_results['winner_by_margin']}", flush=True)
+            else:
+                # Multi-group comparison
+                group_summaries = {}
+                for group_id in group_ids:
+                    group_summaries[group_id] = {
+                        "distributor_count": metrics[group_id].get("distributor_count", 0),
+                        "avg_margin": metrics[group_id].get("avg_margin", 0),
+                        "margin_per_payment_day": metrics[group_id].get("margin_per_payment_day", 0),
+                        "cycle_efficiency_score": metrics[group_id].get("cycle_efficiency_score", 0),
+                        "total_margin_exposure": metrics[group_id].get("total_margin_exposure", 0),
+                        "high_risk_count": len(metrics[group_id].get("high_risk_distributors", [])),
+                    }
+                
+                # Find winners
+                winner_by_margin = max(group_ids, key=lambda gid: metrics[gid].get("avg_margin", 0))
+                winner_by_efficiency = max(group_ids, key=lambda gid: metrics[gid].get("margin_per_payment_day", 0))
+                lowest_risk_group = min(group_ids, key=lambda gid: len(metrics[gid].get("high_risk_distributors", [])))
+                
+                comparison_results.update({
+                    "group_summaries": group_summaries,
+                    "overall_winners": {
+                        "by_margin": winner_by_margin,
+                        "by_efficiency": winner_by_efficiency,
+                        "lowest_risk": lowest_risk_group
+                    }
+                })
+                
+                print(f"✅ [COMPARISON] Payment Cycle: {num_groups} groups compared | "
+                      f"Best Margin: {winner_by_margin}, Most Efficient: {winner_by_efficiency}", flush=True)
+            
+            return {
+                **state,
+                "comparison_results": comparison_results,
+                "error": None
+            }
+        
+        else:
+            # Unsupported data source
+            return {**state, "error": f"Comparison not supported for data_source: {data_source}"}
             
     except Exception as e:
         print(f"❌ [COMPARISON] Error: {str(e)}", flush=True)

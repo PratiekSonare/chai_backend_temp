@@ -146,10 +146,11 @@ class QueryCategorizationLLM(GeminiLLM):
                     User query: {query}
 
                     Strictly categorize into ONE of these:
-                    - order
-                    - profit
+                    - order (sales, revenue, payment modes, order status, customers)
+                    - profit (margins, markups, cost analysis, pricing strategies)
+                    - payment_cycle (distributor payments, cash discounts, payment terms, cycles)
 
-                    Return **only** the single word: "order" or "profit". No explanation, no quotes, no extra text.
+                    Return **only** the single word: "order" or "profit" or "payment_cycle". No explanation, no quotes, no extra text.
 """
 
         try:
@@ -163,7 +164,7 @@ class QueryCategorizationLLM(GeminiLLM):
             # Clean the response
             if isinstance(response_text, str):
                 cleaned = response_text.strip().lower()
-                if cleaned in ["order", "profit"]:
+                if cleaned in ["order", "profit", "payment_cycle"]:
                     data_source = cleaned
                 else:
                     data_source = "order"   # strict fallback
@@ -501,12 +502,137 @@ class PlanningLLM(GeminiLLM):
 
                 Return *only* the JSON object with the structure based on query type.
     """
+
+        payment_cycle_prompt = f"""Today's date is {current_date}.
+
+                User Query: "{query}"
+
+                Available tools (use these names only):
+                get_payment_cycle_data, apply_filters, get_avg_margin, get_weighted_avg_margin, 
+                get_margin_per_payment_day, get_total_margin_exposure, get_high_risk_distributors, 
+                get_cycle_efficiency_score, get_payment_cycle_distribution, get_cash_discount_stats,
+                execute_custom_calculation, get_schema_info, get_statistical_summary, get_percentile
+
+                QUERY TYPE GUIDELINES:
+                - schema_discovery → use get_schema_info
+                - metric_analysis → use specific metric tools
+                - custom_metric_generation → use to calculate custom metrics and pass intent to CustomCalculationLLM
+                - comparison → use for comparing distributors or metrics
+                - standard → simple fetch + optional filters
+
+                Available Schema for 'payment_cycle_and_cash_discount':
+                - "PARTY NAME" (text) - Distributor name
+                - "MARGIN" (number) - Margin percentage
+                - "CD" (number) - Cash discount percentage
+                - "PAYMENT CYCLE" (number) - Payment cycle in days
+                - "ASM NAME" (text) - Account Sales Manager name
+                - "REMARK" (text) - Remarks
+
+                Available Metrics:
+                - Avg Margin - Average margin across distributors
+                - Weighted Avg Margin - Margin weighted by sales volume
+                - Margin per Payment Day - Efficiency score (higher = better)
+                - Total Margin Exposure - Credit risk metric
+                - High-Risk Distributors - Margin > 30% AND cycle > 45 days
+                - Cycle Efficiency Score - (100 - margin) / payment_cycle
+                - Payment Cycle Distribution - Distribution by day ranges
+                - Cash Discount Stats - CN sum, mean, max, min, count
+
+                Always fetch payment cycle data using get_payment_cycle_data first (this is the base data source).
+                Prefer built-in metric tools over custom calculation when possible.
+                Use apply_filters early for optimization when specific conditions (distributor, ASM, etc.) are mentioned.
+
+                Template for generated plan:
+                {{
+                "summarized_query": "4-5 word summary",
+                    "query_type": "standard|comparison|metric_analysis|custom_metric_generation|schema_discovery",
+                "steps": [
+                    {{
+                    "id": "step1",
+                    "tool": "get_payment_cycle_data",
+                    "params": {{}},
+                    "depends_on": [],
+                    "save_as": "pc_data"
+                    }},
+                    {{
+                    "id": "step2", 
+                    "tool": "get_avg_margin",
+                    "params": {{
+                        "table": "{{{{pc_data}}}}"
+                    }},
+                    "depends_on": ["step1"],
+                    "save_as": "avg_margin_result"
+                    }}
+                ],
+                "manipulation": {{
+                    "required": true|false,
+                    "type": "filter"|null
+                }},
+                "tool": "get_payment_cycle_data"
+                }}
+
+                FEW-SHOT EXAMPLES:
+                These show exactly how to chain tools for different query types. Copy the structure exactly.
+
+                Query: "What is the average margin for all distributors?"
+                {{
+                    "summarized_query": "Average margin all distributors",
+                    "query_type": "metric_analysis",
+                    "steps": [
+                        {{"id": "step1", "tool": "get_payment_cycle_data", "params": {{}}, "depends_on": [], "save_as": "pc_data"}},
+                        {{"id": "step2", "tool": "get_avg_margin", "params": {{"table": "{{{{pc_data}}}}"}}, "depends_on": ["step1"], "save_as": "avg_margin_result"}}
+                    ],
+                    "manipulation": {{"required": false, "type": null}},
+                    "tool": "get_payment_cycle_data"
+                }}
+
+                Query: "Show margin per payment day efficiency for all distributors"
+                {{
+                    "summarized_query": "Margin efficiency by payment cycle",
+                    "query_type": "metric_analysis",
+                    "steps": [
+                        {{"id": "step1", "tool": "get_payment_cycle_data", "params": {{}}, "depends_on": [], "save_as": "pc_data"}},
+                        {{"id": "step2", "tool": "get_margin_per_payment_day", "params": {{"table": "{{{{pc_data}}}}"}}, "depends_on": ["step1"], "save_as": "efficiency_result"}}
+                    ],
+                    "manipulation": {{"required": false, "type": null}},
+                    "tool": "get_payment_cycle_data"
+                }}
+
+                Query: "Identify high-risk distributors with high margin and long payment cycle"
+                {{
+                    "summarized_query": "High-risk distributor analysis",
+                    "query_type": "metric_analysis",
+                    "steps": [
+                        {{"id": "step1", "tool": "get_payment_cycle_data", "params": {{}}, "depends_on": [], "save_as": "pc_data"}},
+                        {{"id": "step2", "tool": "get_high_risk_distributors", "params": {{"table": "{{{{pc_data}}}}", "margin_threshold": 30, "cycle_threshold": 45}}, "depends_on": ["step1"], "save_as": "risk_result"}}
+                    ],
+                    "manipulation": {{"required": false, "type": null}},
+                    "tool": "get_payment_cycle_data"
+                }}
+
+                Query: "Compare average margin between ASM1 and ASM2 distributors"
+                {{
+                    "summarized_query": "Compare margin by ASM",
+                    "query_type": "comparison",
+                    "steps": [
+                        {{"id": "step1", "tool": "get_payment_cycle_data", "params": {{}}, "depends_on": [], "save_as": "pc_raw"}},
+                        {{"id": "step2", "tool": "apply_filters", "params": {{"table": "{{{{pc_raw}}}}", "filters": []}}, "depends_on": ["step1"], "save_as": "pc_filtered"}},
+                        {{"id": "step3", "tool": "get_avg_margin", "params": {{"table": "{{{{pc_filtered}}}}"}}, "depends_on": ["step2"], "save_as": "comparison_result"}}
+                    ],
+                    "manipulation": {{"required": false, "type": null}},
+                    "tool": "get_payment_cycle_data"
+                }}
+
+                Return *only* the JSON object with the structure based on query type.
+    """
         
         # Select prompt
         prompt = ""
         if data_source == "profit":
             # print("validating that the data_source in the planning node is actually profit!!!!!!", flush=True)
             prompt = profit_prompt
+        elif data_source == "payment_cycle":
+            prompt = payment_cycle_prompt
         elif data_source == "order":
             prompt = order_prompt
 
@@ -766,17 +892,66 @@ Response: {{
 
 Return ONLY the JSON, no other text."""
 
-        # ⚠️  CRITICAL: Select prompt based on data_source parameter
-        # If data_source is NOT passed from workflow.grouping_node, it defaults to "order" 
-        # and will use order_prompt even for profit queries!
-        # This causes the LLM to group by fields from the order schema instead of profit schema,
-        # resulting in non-existent fields like "product_name" being used as grouping dimensions.
-        #
-        # TODO: Consider refactoring to read schemas from prompts_list files:
-        # - prompts_list/profit.txt (already has schema definition)
-        # - prompts_list/orders.txt (if it exists)
-        # This would make schemas DRY and easier to update without touching code.
-        prompt = profit_prompt if data_source == "profit" else order_prompt
+        payment_cycle_prompt = f"""You are a comparison group extraction assistant for a payment cycle and distributor management system.
+
+User Query: "{query}"
+
+Your task is to identify what groups are being compared based on the payment_cycle_and_cash_discount data.
+
+Available Schema for 'payment_cycle_and_cash_discount':
+- "PARTY NAME" (text) - Distributor/party name - Examples: ABC Distributors, XYZ Traders, etc.
+- "MARGIN" (number) - Margin percentage - Examples: 15, 25, 30, 35, etc.
+- "CD" (number) - Cash discount percentage
+- "PAYMENT CYCLE" (number) - Payment cycle in days
+- "ASM NAME" (text) - Account Sales Manager name
+- "REMARK" (text) - Remarks/notes
+
+Return ONLY a valid JSON object with this structure:
+{{
+  "groups": [
+    {{
+      "group_id": "descriptive_id",
+      "filters": {{
+        "field_name": "value"
+      }}
+    }}
+  ]
+}}
+
+Common comparison dimensions for payment cycle data (for filters field):
+- ASM NAME - Account Sales Manager
+- MARGIN - Margin percentage ranges or specific values
+- PAYMENT CYCLE - Payment cycle days or ranges
+- PARTY NAME - Specific distributor names
+
+Examples:
+Query: "Compare distributors for ASM1 vs ASM2"
+Response: {{
+  "groups": [
+    {{"group_id": "asm1", "filters": {{"ASM NAME": "ASM1"}}}},
+    {{"group_id": "asm2", "filters": {{"ASM NAME": "ASM2"}}}}
+  ]
+}}
+
+Query: "Compare high margin vs low margin distributors"
+Response: {{
+  "groups": [
+    {{"group_id": "high_margin", "filters": {{"MARGIN": {{"operator": "gte", "value": 30}}}}}},
+    {{"group_id": "low_margin", "filters": {{"MARGIN": {{"operator": "lt", "value": 30}}}}}}
+  ]
+}}
+
+Query: "Compare short payment cycle vs long payment cycle distributors"
+Response: {{
+  "groups": [
+    {{"group_id": "short_cycle", "filters": {{"PAYMENT CYCLE": {{"operator": "lt", "value": 30}}}}}},
+    {{"group_id": "long_cycle", "filters": {{"PAYMENT CYCLE": {{"operator": "gte", "value": 45}}}}}}
+  ]
+}}
+
+Return ONLY the JSON, no other text."""
+
+        prompt = profit_prompt if data_source == "profit" else (payment_cycle_prompt if data_source == "payment_cycle" else order_prompt)
         
         response = self._generate_content(
             prompt=prompt,
