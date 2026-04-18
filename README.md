@@ -170,6 +170,56 @@ ate Limiting**: Add rate limiting for API protection
 6. **Pagproviders.py    # OpenRouterion for large result sets
 7. **Async Processing**: Consider async processing for long-running queries
 
+## Celery + Redis Preset KPI Cache
+
+The backend now supports background precomputation for the unified KPI endpoint:
+
+- Presets only: `7d`, `30d`, `all`
+- No filters in this background cache flow
+- Cache-first path in `POST /history/kpi/all`
+
+### How It Works
+
+1. API request hits `POST /history/kpi/all`.
+2. If request is a supported preset with no filters, API checks Redis preset key first.
+3. On cache hit, response is returned immediately.
+4. On cache miss, API enqueues Celery preset precompute and falls back to live compute.
+5. Live result is written back to Redis for subsequent fast reads.
+
+### Cache Refresh / Invalidation
+
+Use:
+
+```bash
+POST /history/cache/refresh
+```
+
+Body (optional):
+
+```json
+{
+  "table_name": "history-orders-dev",
+  "invalidate": true
+}
+```
+
+- `invalidate=true` bumps cache version and invalidates old preset keys.
+- This endpoint should be called after new order ingestion.
+
+### Run Celery Worker
+
+From `backend/`:
+
+```bash
+celery -A celery_app.celery_app worker --loglevel=info
+```
+
+Optional beat scheduler (if you later add periodic schedules):
+
+```bash
+celery -A celery_app.celery_app beat --loglevel=info
+```
+
 ## File Structure
 
 ```

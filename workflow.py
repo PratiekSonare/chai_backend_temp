@@ -75,7 +75,7 @@ async def emit_step_event(
     )
 
 
-async def gate_next_step(state: AgentState, next_step: str, wait_ms: int = 500) -> None:
+async def gate_next_step(state: AgentState, next_step: str, wait_ms: int = 0) -> None:
     """Emit pending event before enforced debounce so frontend can show upcoming step."""
     await emit_step_event(
         state,

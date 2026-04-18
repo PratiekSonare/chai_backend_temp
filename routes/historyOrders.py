@@ -2,14 +2,25 @@ import os
 import pandas as pd
 import asyncio
 import boto3
-import hashlib
 from decimal import Decimal
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Body
 from datetime import datetime, timedelta
 from utils.type_converters import convert_numpy_types
 from models import HistoryOrdersRequest, OrderStatus, PaymentMode, OrderType
 from typing import Optional, Dict, Any, Union
 import json
+from services.history_kpi_cache import (
+    resolve_preset,
+    get_cached_preset_payload,
+    set_cached_preset_payload,
+    get_cached_batch_all_metrics_payload,
+    set_cached_batch_all_metrics_payload,
+    enqueue_preset_refresh,
+    enqueue_all_presets_refresh,
+    enqueue_batch_all_metrics_refresh,
+    enqueue_all_batch_all_metrics_refresh,
+    bump_cache_version,
+)
 
 # Initialize Supabase client
 try:
@@ -29,7 +40,7 @@ except Exception as e:
 router = APIRouter()
 
 DYNAMODB_REGION = os.getenv("AWS_REGION", "ap-south-1")
-DYNAMODB_TABLE_NAME = os.getenv("HISTORY_ORDERS_DYNAMODB_TABLE", "history-orders-latest-4")
+DYNAMODB_TABLE_NAME = os.getenv("HISTORY_ORDERS_DYNAMODB_TABLE", "history-orders-dev")
 
 # ============ ENUM HELPER FUNCTIONS ============
 def _normalize_status(value: Optional[str]) -> Optional[str]:
@@ -64,6 +75,7 @@ REQUIRED_COLUMNS = [
     'suborder_sku',          # Alternative SKU column
     'suborder_marketplace_sku',  # Alternative SKU column
     'marketplace_sku',       # Alternative SKU column
+    'suborder_model_no',     # For style/model name in SKU metrics
     'order_status',          # For status-based metrics (delivered, cancelled, returned)
     'payment_mode',          # For COD/PrePaid analysis
     'order_type',            # For B2B vs B2C analysis
@@ -405,199 +417,94 @@ def historical_orders_filter_options():
 
 
 # ============ UNIFIED ASYNC KPI ENDPOINT ============
-try:
-    import redis
-except Exception:
-    redis = None
+def _calculate_kpi_payload(df: pd.DataFrame) -> dict:
+    if df.empty:
+        results = {
+            "totalOrders": 0,
+            "unitsSold": 0,
+            "grossRevenue": 0.0,
+            "aov": 0.0,
+            "uniqueSkus": 0,
+            "cancellationRate": 0.0,
+            "returnRate": 0.0,
+            "codShare": 0.0,
+            "deliveredRate": 0.0,
+        }
+    else:
+        total_orders = _order_count(df)
+        units_sold = _comparison_units(df)
+        gross_revenue = float(df['total_amount'].sum()) if 'total_amount' in df.columns else 0.0
+        aov = float(gross_revenue / total_orders) if total_orders > 0 else 0.0
+        unique_skus = int(df['sku'].nunique()) if 'sku' in df.columns else 0
+        cancellation_rate = round(_status_rate(df, {'Cancelled'}), 2)
+        return_rate = round(_status_rate(df, {'RTO'}), 2)
 
-def _redis_keys(request_id: str) -> tuple[str, str]:
-    safe_request_id = "".join(ch for ch in request_id if ch.isalnum() or ch in ("-", "_"))
-    if not safe_request_id:
-        safe_request_id = "unknown"
-    return (f"request_logs:{safe_request_id}:events", f"request_logs:{safe_request_id}:seq")
+        if 'payment_mode' in df.columns and len(df) > 0:
+            cod_share = round(float((df['payment_mode'] == 'COD').sum() / len(df) * 100), 2)
+        else:
+            cod_share = 0.0
 
-REDIS_URL = os.getenv('REDIS_URL')
-_redis_client = None
-_redis_init_failed = False
+        delivered_rate = round(_status_rate(df, {'Delivered'}), 2)
 
-def _get_redis_client() -> Any | None:
-    global _redis_client, _redis_init_failed
-    try:
-        # print("redis url: ", REDIS_URL, flush=True)
-        _redis_client = redis.from_url(REDIS_URL, decode_responses=True)
-        _redis_client.ping()
-        return _redis_client
-    except Exception:
-        _redis_init_failed = True
-        _redis_client = None
-        return None
+        results = {
+            "totalOrders": int(total_orders),
+            "unitsSold": int(units_sold),
+            "grossRevenue": float(gross_revenue),
+            "aov": float(aov),
+            "uniqueSkus": int(unique_skus),
+            "cancellationRate": float(cancellation_rate),
+            "returnRate": float(return_rate),
+            "codShare": float(cod_share),
+            "deliveredRate": float(delivered_rate),
+        }
+
+    return {
+        'success': True,
+        'data': {
+            'totalOrders': {'value': results['totalOrders'], 'unit': 'orders', 'metric_name': 'Total Orders'},
+            'unitsSold': {'value': results['unitsSold'], 'unit': 'units', 'metric_name': 'Units Sold'},
+            'grossRevenue': {'value': results['grossRevenue'], 'unit': 'INR', 'metric_name': 'Gross Revenue'},
+            'aov': {'value': results['aov'], 'unit': 'INR', 'metric_name': 'Average Order Value'},
+            'uniqueSkus': {'value': results['uniqueSkus'], 'unit': 'skus', 'metric_name': 'Unique SKUs'},
+            'cancellationRate': {'value': results['cancellationRate'], 'unit': '%', 'metric_name': 'Cancellation Rate'},
+            'returnRate': {'value': results['returnRate'], 'unit': '%', 'metric_name': 'Return Rate'},
+            'codShare': {'value': results['codShare'], 'unit': '%', 'metric_name': 'COD Share'},
+            'deliveredRate': {'value': results['deliveredRate'], 'unit': '%', 'metric_name': 'Delivered Rate'},
+        },
+        'timestamp': datetime.now().isoformat(),
+    }
 
 
-def _make_cache_key(request: HistoryOrdersRequest) -> str:
-    """Generate a consistent cache key based on request parameters."""
-    start = str(request.start_date).strip() if request.start_date else "none"
-    end = str(request.end_date).strip() if request.end_date else "none"
-
-    filters_payload = request.filters if isinstance(request.filters, dict) else {}
-    normalized_filters = convert_numpy_types(filters_payload)
-    filters_serialized = json.dumps(normalized_filters, sort_keys=True, separators=(",", ":"), default=str)
-    filters_hash = hashlib.sha256(filters_serialized.encode("utf-8")).hexdigest()[:16]
-
-    return f"kpi:history:all:{request.table_name}:{start}:{end}:{filters_hash}"
-
-
-def _serialize_for_redis(data: dict) -> str:
-    """Safe JSON serialization that handles numpy types and datetime."""
-    # First convert any numpy/pandas quirks
-    clean_data = convert_numpy_types(data)
-    return json.dumps(clean_data, default=str)  # default=str handles datetime safely
+def build_kpi_response(request: HistoryOrdersRequest, source: str = 'database') -> dict:
+    df = fetch_historical_orders(request)
+    payload = _calculate_kpi_payload(df)
+    payload['source'] = source
+    return convert_numpy_types(payload)
 
 
 @router.post('/history/kpi/all')
 async def kpi_all(request: HistoryOrdersRequest):
     """
-    Unified KPI endpoint with Redis caching.
-    Cache survives page reloads and serves data instantly on cache hit.
+    Unified KPI endpoint with preset cache-first behavior.
     """
-    cache_key = _make_cache_key(request)
-    redis_client = _get_redis_client()
+    preset = resolve_preset(request.start_date, request.end_date, request.filters)
 
     try:
         print(f"Request started with params: {request.table_name}, {request.start_date}, {request.end_date}", flush=True)
 
-        # === 1. Check Redis Cache ===
-        if redis_client:
-            try:
-                cached = redis_client.get(cache_key)
-                if cached:
-                    print(f"🚀 Cache HIT for key: {cache_key}", flush=True)
-                    cached_response = json.loads(cached)
-                    # Optional: update timestamp on every hit
-                    cached_response['timestamp'] = datetime.now().isoformat()
-                    return cached_response
-            except Exception as cache_err:
-                print(f"Redis get error (non-fatal): {cache_err}", flush=True)
-                # Continue to DB on cache failure
-        else:
-            print("no valid redis client detected", flush=True)
+        # Fast path for supported background-cache requests only.
+        if preset:
+            cached_payload = get_cached_preset_payload(request.table_name, preset)
+            if cached_payload:
+                print(f"🚀 Preset cache HIT: table={request.table_name}, preset={preset}", flush=True)
+                return cached_payload
+            enqueue_preset_refresh(request.table_name, preset)
 
-        # === 2. Cache Miss → Fetch from Database ===
-        print("⛔ Cache MISS - Fetching from database...", flush=True)
-        df = fetch_historical_orders(request)
-        print("Fetching complete", flush=True)
-
-        if df.empty:
-            print("df is empty!", flush=True)
-
-        # Your existing KPI calculation functions (unchanged)
-        def calculate_total_orders():
-            if df.empty:
-                return 0
-            return int(df['order_id'].nunique() if 'order_id' in df.columns else len(df))
-
-        def calculate_units_sold():
-            if df.empty:
-                return 0
-            if 'item_quantity' in df.columns:
-                return int(df['item_quantity'].sum())
-            elif 'suborder_quantity' in df.columns:
-                return int(df['suborder_quantity'].sum())
-            else:
-                return int(df['order_quantity'].sum() if 'order_quantity' in df.columns else len(df))
-
-        def calculate_gross_revenue():
-            if df.empty or 'total_amount' not in df.columns:
-                return 0.0
-            return float(df['total_amount'].sum())
-
-        def calculate_aov():
-            if df.empty or 'total_amount' not in df.columns:
-                return 0.0
-            return float(df['total_amount'].mean())
-
-        def calculate_unique_skus():
-            if df.empty or 'sku' not in df.columns:
-                return 0
-            return int(df['sku'].nunique())
-
-        def calculate_cancellation_rate():
-            if df.empty:
-                return 0.0
-            total = _order_count(df)
-            cancelled = _status_order_count(df, {'Cancelled'})
-            return round(_safe_pct(float(cancelled), float(total)), 2)
-
-        def calculate_return_rate():
-            if df.empty:
-                return 0.0
-            total = _order_count(df)
-            rto = _status_order_count(df, {'RTO'})
-            return round(_safe_pct(float(rto), float(total)), 2)
-
-        def calculate_cod_share():
-            if df.empty or 'payment_mode' not in df.columns:
-                return 0.0
-            total = len(df)
-            cod = len(df[df['payment_mode'] == 'COD'])
-            return round((cod / total * 100) if total > 0 else 0.0, 2)
-
-        def calculate_delivered_rate():
-            if df.empty or 'order_status' not in df.columns:
-                return 0.0
-            total = len(df)
-            delivered = len(df[df['order_status'].apply(lambda x: OrderStatus.normalize(x) if x else None) == OrderStatus.DELIVERED.value])
-            return round((delivered / total * 100) if total > 0 else 0.0, 2)
-
-        # Run calculations concurrently using thread pool (good for CPU-bound pandas work)
         loop = asyncio.get_event_loop()
+        final_response = await loop.run_in_executor(None, build_kpi_response, request, 'database')
 
-        kpi_tasks = {
-            'totalOrders': loop.run_in_executor(None, calculate_total_orders),
-            'unitsSold': loop.run_in_executor(None, calculate_units_sold),
-            'grossRevenue': loop.run_in_executor(None, calculate_gross_revenue),
-            'aov': loop.run_in_executor(None, calculate_aov),
-            'uniqueSkus': loop.run_in_executor(None, calculate_unique_skus),
-            'cancellationRate': loop.run_in_executor(None, calculate_cancellation_rate),
-            'returnRate': loop.run_in_executor(None, calculate_return_rate),
-            'codShare': loop.run_in_executor(None, calculate_cod_share),
-            'deliveredRate': loop.run_in_executor(None, calculate_delivered_rate),
-        }
-
-        results = {}
-        for key, task in kpi_tasks.items():
-            results[key] = await task
-
-        # Build final response
-        kpi_response = {
-            'success': True,
-            'data': {
-                'totalOrders': {'value': results['totalOrders'], 'unit': 'orders', 'metric_name': 'Total Orders'},
-                'unitsSold': {'value': results['unitsSold'], 'unit': 'units', 'metric_name': 'Units Sold'},
-                'grossRevenue': {'value': results['grossRevenue'], 'unit': 'INR', 'metric_name': 'Gross Revenue'},
-                'aov': {'value': results['aov'], 'unit': 'INR', 'metric_name': 'Average Order Value'},
-                'uniqueSkus': {'value': results['uniqueSkus'], 'unit': 'skus', 'metric_name': 'Unique SKUs'},
-                'cancellationRate': {'value': results['cancellationRate'], 'unit': '%', 'metric_name': 'Cancellation Rate'},
-                'returnRate': {'value': results['returnRate'], 'unit': '%', 'metric_name': 'Return Rate'},
-                'codShare': {'value': results['codShare'], 'unit': '%', 'metric_name': 'COD Share'},
-                'deliveredRate': {'value': results['deliveredRate'], 'unit': '%', 'metric_name': 'Delivered Rate'},
-            },
-            'timestamp': datetime.now().isoformat(),
-            'source': 'database'   # Helpful for debugging
-        }
-
-        final_response = convert_numpy_types(kpi_response)
-
-        # === 3. Store result in Redis (Cache Populate) ===
-        if redis_client:
-            try:
-                redis_client.set(
-                    cache_key,
-                    _serialize_for_redis(final_response),
-                    ex=600,                                 # TTL = 10 minutes (adjust as needed)
-                )
-                print(f"✅ Cache SET for key: {cache_key} (TTL: 10min)", flush=True)
-            except Exception as cache_err:
-                print(f"Redis set error (non-fatal): {cache_err}", flush=True)
+        if preset:
+            set_cached_preset_payload(request.table_name, preset, final_response)
 
         return final_response
 
@@ -606,6 +513,38 @@ async def kpi_all(request: HistoryOrdersRequest):
             status_code=500,
             detail=f"Error calculating KPIs: {str(e)}"
         )
+
+
+@router.post('/history/cache/refresh')
+def refresh_history_kpi_cache(payload: Optional[Dict[str, Any]] = Body(default=None)):
+    """
+    Invalidate and refresh preset KPI caches for 7d/30d/all-time.
+    Call this endpoint after new order ingestion.
+    """
+    try:
+        body = payload or {}
+        table_name = str(body.get("table_name") or DYNAMODB_TABLE_NAME).strip()
+        invalidate_raw = body.get("invalidate", True)
+        if isinstance(invalidate_raw, str):
+            invalidate = invalidate_raw.strip().lower() not in {"0", "false", "no"}
+        else:
+            invalidate = bool(invalidate_raw)
+
+        version = bump_cache_version(table_name) if invalidate else None
+        enqueue_all_presets_refresh(table_name=table_name, version=version)
+        enqueue_all_batch_all_metrics_refresh(table_name=table_name, version=version)
+
+        return {
+            "success": True,
+            "table_name": table_name,
+            "invalidate": invalidate,
+            "cache_version": version,
+            "queued_presets": ["7d", "30d", "all"],
+            "queued_scopes": ["kpi-all", "batch-all-metrics"],
+            "timestamp": datetime.now().isoformat(),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error refreshing history KPI cache: {str(e)}")
 
 # ============ KPI CHART ENDPOINTS ============
 def _parse_iso_datetime(value: Optional[str], field_name: str) -> Optional[datetime]:
@@ -3003,22 +2942,25 @@ def metrics_top_skus_by_revenue(request: HistoryOrdersRequest):
         df = _ensure_numeric(df, ['total_amount', 'item_quantity', 'suborder_quantity', 'order_quantity'])
         df['sku_clean'] = df['sku'].astype(str).str.strip()
         
-        sku_metrics = df.groupby('sku_clean', dropna=False).agg({
+        agg_dict = {
             'order_id': 'nunique',
             'total_amount': 'sum',
             'item_quantity': 'sum',
             'suborder_quantity': 'sum',
-            'order_quantity': 'sum'
-        }).rename(columns={'order_id': 'order_count', 'total_amount': 'revenue'})
-        
+            'order_quantity': 'sum',
+            'suborder_model_no': 'first'
+        }
+        sku_metrics = df.groupby('sku_clean', dropna=False).agg(agg_dict).rename(columns={'order_id': 'order_count', 'total_amount': 'revenue'})
         sku_metrics = sku_metrics.sort_values('revenue', ascending=False).head(5)
         
         results = []
         for sku, row in sku_metrics.iterrows():
             units = row['item_quantity'] if pd.notna(row['item_quantity']) and row['item_quantity'] > 0 else (row['suborder_quantity'] if pd.notna(row['suborder_quantity']) else row['order_quantity'])
             aov = float(row['revenue'] / row['order_count']) if row['order_count'] > 0 else 0.0
+            style_name = str(row['suborder_model_no']) if 'suborder_model_no' in sku_metrics.columns and pd.notna(row['suborder_model_no']) else ''
             results.append({
                 "sku": str(sku),
+                "style_name": style_name,
                 "revenue": float(row['revenue']),
                 "order_count": int(row['order_count']),
                 "units": int(units) if pd.notna(units) else 0,
@@ -3071,19 +3013,24 @@ def metrics_top_skus_by_units(request: HistoryOrdersRequest):
                 "timestamp": datetime.now().isoformat()
             })
         
-        sku_metrics = df.groupby('sku_clean', dropna=False).agg({
+        agg_dict = {
             qty_col: 'sum',
             'order_id': 'nunique',
             'total_amount': 'sum'
-        }).rename(columns={qty_col: 'units', 'order_id': 'order_count', 'total_amount': 'revenue'})
+        }
+        if 'suborder_model_no' in df.columns:
+            agg_dict['suborder_model_no'] = 'first'
+        sku_metrics = df.groupby('sku_clean', dropna=False).agg(agg_dict).rename(columns={qty_col: 'units', 'order_id': 'order_count', 'total_amount': 'revenue'})
         
         sku_metrics = sku_metrics.sort_values('units', ascending=False).head(5)
         
         results = []
         for sku, row in sku_metrics.iterrows():
             aov = float(row['revenue'] / row['order_count']) if row['order_count'] > 0 else 0.0
+            style_name = str(row['suborder_model_no']) if 'suborder_model_no' in sku_metrics.columns and pd.notna(row['suborder_model_no']) else ''
             results.append({
                 "sku": str(sku),
+                "style_name": style_name,
                 "units": int(row['units']),
                 "order_count": int(row['order_count']),
                 "revenue": float(row['revenue']),
@@ -3237,19 +3184,24 @@ def metrics_sku_performance_matrix(request: HistoryOrdersRequest):
                 "timestamp": datetime.now().isoformat()
             })
         
-        sku_metrics = df.groupby('sku_clean', dropna=False).agg({
+        agg_dict = {
             'total_amount': 'sum',
             qty_col: 'sum',
             'order_id': 'nunique'
-        }).rename(columns={'total_amount': 'revenue', qty_col: 'units', 'order_id': 'order_count'})
+        }
+        if 'suborder_model_no' in df.columns:
+            agg_dict['suborder_model_no'] = 'first'
+        sku_metrics = df.groupby('sku_clean', dropna=False).agg(agg_dict).rename(columns={'total_amount': 'revenue', qty_col: 'units', 'order_id': 'order_count'})
         
         # Sort by revenue descending, limit to top 20
         sku_metrics = sku_metrics.sort_values('revenue', ascending=False).head(20)
         
         results = []
         for sku, row in sku_metrics.iterrows():
+            style_name = str(row['suborder_model_no']) if 'suborder_model_no' in sku_metrics.columns and pd.notna(row['suborder_model_no']) else ''
             results.append({
                 "sku": str(sku),
+                "style_name": style_name,
                 "revenue": float(row['revenue']),
                 "units": int(row['units']),
                 "order_count": int(row['order_count']),
@@ -4280,15 +4232,24 @@ async def batch_all_metrics(request: HistoryOrdersRequest):
     
     Returns structured response organized by category.
     """
+    preset = resolve_preset(request.start_date, request.end_date, request.filters)
+
     try:
         print(f"Batch metrics request started: {request.table_name}, {request.start_date}, {request.end_date}", flush=True)
+
+        if preset:
+            cached_payload = get_cached_batch_all_metrics_payload(request.table_name, preset)
+            if cached_payload:
+                print(f"🚀 Batch preset cache HIT: table={request.table_name}, preset={preset}", flush=True)
+                return cached_payload
+            enqueue_batch_all_metrics_refresh(request.table_name, preset)
         
         # === Fetch data once ===
         df = fetch_historical_orders(request)
         print(f"Data fetched: {len(df)} rows", flush=True)
         
         if df.empty:
-            return convert_numpy_types({
+            final_response = convert_numpy_types({
                 "success": True,
                 "data": {
                     "primaryKpis": {},
@@ -4302,6 +4263,9 @@ async def batch_all_metrics(request: HistoryOrdersRequest):
                 },
                 "timestamp": datetime.now().isoformat()
             })
+            if preset:
+                set_cached_batch_all_metrics_payload(request.table_name, preset, final_response)
+            return final_response
         
         # === Ensure numeric columns ===
         df = _ensure_numeric(df, ['total_amount', 'item_quantity', 'suborder_quantity', 'order_quantity'])
@@ -4459,21 +4423,26 @@ async def batch_all_metrics(request: HistoryOrdersRequest):
         if 'sku' in df.columns:
             df_sku = df.copy()
             df_sku['sku_clean'] = df_sku['sku'].astype(str).str.strip()
-            sku_metrics = df_sku.groupby('sku_clean', dropna=False).agg({
+            agg_dict = {
                 'order_id': 'nunique',
                 'total_amount': 'sum',
                 'item_quantity': 'sum',
                 'suborder_quantity': 'sum',
                 'order_quantity': 'sum'
-            }).rename(columns={'order_id': 'order_count', 'total_amount': 'revenue'})
+            }
+            if 'suborder_model_no' in df_sku.columns:
+                agg_dict['suborder_model_no'] = 'first'
+            sku_metrics = df_sku.groupby('sku_clean', dropna=False).agg(agg_dict).rename(columns={'order_id': 'order_count', 'total_amount': 'revenue'})
             sku_metrics = sku_metrics.sort_values('revenue', ascending=False).head(5)
             
             top_skus_revenue = []
             for sku, row in sku_metrics.iterrows():
                 units = row[units_col] if units_col and pd.notna(row[units_col]) else 0
                 aov_sku = float(row['revenue'] / row['order_count']) if row['order_count'] > 0 else 0.0
+                style_name = str(row['suborder_model_no']) if 'suborder_model_no' in sku_metrics.columns and pd.notna(row['suborder_model_no']) else ''
                 top_skus_revenue.append({
                     "sku": str(sku),
+                    "style_name": style_name,
                     "revenue": float(row['revenue']),
                     "order_count": int(row['order_count']),
                     "units": int(units),
@@ -4490,18 +4459,23 @@ async def batch_all_metrics(request: HistoryOrdersRequest):
         if 'sku' in df.columns and units_col:
             df_sku = df.copy()
             df_sku['sku_clean'] = df_sku['sku'].astype(str).str.strip()
-            sku_units = df_sku.groupby('sku_clean', dropna=False).agg({
+            agg_dict = {
                 'order_id': 'nunique',
                 'total_amount': 'sum',
                 units_col: 'sum'
-            }).rename(columns={'order_id': 'order_count', 'total_amount': 'revenue', units_col: 'units'})
+            }
+            if 'suborder_model_no' in df_sku.columns:
+                agg_dict['suborder_model_no'] = 'first'
+            sku_units = df_sku.groupby('sku_clean', dropna=False).agg(agg_dict).rename(columns={'order_id': 'order_count', 'total_amount': 'revenue', units_col: 'units'})
             sku_units = sku_units.sort_values('units', ascending=False).head(5)
             
             top_skus_units = []
             for sku, row in sku_units.iterrows():
                 aov_sku = float(row['revenue'] / row['order_count']) if row['order_count'] > 0 else 0.0
+                style_name = str(row['suborder_model_no']) if 'suborder_model_no' in sku_units.columns and pd.notna(row['suborder_model_no']) else ''
                 top_skus_units.append({
                     "sku": str(sku),
+                    "style_name": style_name,
                     "units": int(row['units']),
                     "order_count": int(row['order_count']),
                     "revenue": float(row['revenue']),
@@ -4545,16 +4519,21 @@ async def batch_all_metrics(request: HistoryOrdersRequest):
         if 'sku' in df.columns and units_col:
             df_perf = df.copy()
             df_perf['sku_clean'] = df_perf['sku'].astype(str).str.strip()
-            sku_perf_agg = df_perf.groupby('sku_clean', dropna=False).agg({
+            agg_dict = {
                 'order_id': 'nunique',
                 'total_amount': 'sum',
                 units_col: 'sum'
-            }).rename(columns={'order_id': 'orders', 'total_amount': 'revenue', units_col: 'units'})
+            }
+            if 'suborder_model_no' in df_perf.columns:
+                agg_dict['suborder_model_no'] = 'first'
+            sku_perf_agg = df_perf.groupby('sku_clean', dropna=False).agg(agg_dict).rename(columns={'order_id': 'orders', 'total_amount': 'revenue', units_col: 'units'})
             sku_perf_agg = sku_perf_agg.sort_values('revenue', ascending=False).head(10)
             
             for sku, row in sku_perf_agg.iterrows():
+                style_name = str(row['suborder_model_no']) if 'suborder_model_no' in sku_perf_agg.columns and pd.notna(row['suborder_model_no']) else ''
                 sku_perf.append({
                     "sku": str(sku),
+                    "style_name": style_name,
                     "units": int(row['units']),
                     "revenue": float(row['revenue']),
                     "orders": int(row['orders'])
@@ -4895,7 +4874,7 @@ async def batch_all_metrics(request: HistoryOrdersRequest):
         }
         
         # === RETURN STRUCTURED RESPONSE ===
-        return convert_numpy_types({
+        final_response = convert_numpy_types({
             "success": True,
             "data": {
                 "primaryKpis": primaryKpis,
@@ -4909,6 +4888,10 @@ async def batch_all_metrics(request: HistoryOrdersRequest):
             },
             "timestamp": datetime.now().isoformat()
         })
+
+        if preset:
+            set_cached_batch_all_metrics_payload(request.table_name, preset, final_response)
+        return final_response
         
     except Exception as e:
         print(f"Error in batch metrics endpoint: {str(e)}", flush=True)

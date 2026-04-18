@@ -91,7 +91,7 @@ class GeographyRequest(BaseModel):
 
 class HistoryOrdersRequest(BaseModel):
     """Request model for historical orders queries from DyanmoDB"""
-    table_name: str = "history-orders-latest"
+    table_name: str = "history-orders-final"
     start_date: str
     end_date: str
     filters: Optional[Dict[str, Any]] = None

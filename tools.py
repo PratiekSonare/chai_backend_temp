@@ -1460,39 +1460,6 @@ def get_correlation_matrix(table: pd.DataFrame, fields: list) -> dict:
         print(f"Error in calculating correlation matrix: {e}")
         return None
 
-
-
-# Tool registry mapping
-ORDERS_TOOL_REGISTRY = {
-    "get_all_orders": get_all_orders,
-    "apply_filters": apply_filters,  # Enable early filtering optimization
-    "get_schema_info": get_schema_info,
-    "convert_to_df": convert_to_df,
-    "execute_custom_calculation": execute_custom_calculation,  # Dynamic code generation for custom metrics
-    "get_aov": get_aov,
-    "get_total_revenue": get_total_revenue,
-    "get_order_count": get_order_count,
-    "get_cancelled_count": get_cancelled_count,
-    "get_order_status_distribution": get_order_status_distribution,
-    "get_payment_mode_distribution": get_payment_mode_distribution,
-    "get_marketplace_distribution": get_marketplace_distribution,
-    "get_state_wise_distribution": get_state_wise_distribution,
-    "get_city_wise_distribution": get_city_wise_distribution,
-    "get_courier_distribution": get_courier_distribution,
-    "get_average_discount": get_average_discount,
-    "get_average_shipping_charge": get_average_shipping_charge,
-    "get_average_tax": get_average_tax,
-    "get_statistical_summary": get_statistical_summary,
-    "get_percentile": get_percentile,
-    "get_top_percentile": get_top_percentile,
-    "get_bottom_percentile": get_bottom_percentile,
-    "get_correlation_matrix": get_correlation_matrix,
-    "get_conversion_rate": get_conversion_rate,
-    "get_cod_vs_prepaid_metrics": get_cod_vs_prepaid_metrics,
-    "get_geographic_insights": get_geographic_insights,
-    "get_common_metrics": get_common_metrics,
-}
-
 # ===================================================================
 # PAYMENT CYCLE TOOLS
 # ===================================================================
@@ -1774,6 +1741,37 @@ PAYMENT_CYCLE_TOOL_REGISTRY = {
     "get_schema_info": get_schema_info,
     "get_statistical_summary": get_statistical_summary,
     "get_percentile": get_percentile,
+}
+
+# Tool registry mapping
+ORDERS_TOOL_REGISTRY = {
+    "get_all_orders": get_all_orders,
+    "apply_filters": apply_filters,  # Enable early filtering optimization
+    "get_schema_info": get_schema_info,
+    "convert_to_df": convert_to_df,
+    "execute_custom_calculation": execute_custom_calculation,  # Dynamic code generation for custom metrics
+    "get_aov": get_aov,
+    "get_total_revenue": get_total_revenue,
+    "get_order_count": get_order_count,
+    "get_cancelled_count": get_cancelled_count,
+    "get_order_status_distribution": get_order_status_distribution,
+    "get_payment_mode_distribution": get_payment_mode_distribution,
+    "get_marketplace_distribution": get_marketplace_distribution,
+    "get_state_wise_distribution": get_state_wise_distribution,
+    "get_city_wise_distribution": get_city_wise_distribution,
+    "get_courier_distribution": get_courier_distribution,
+    "get_average_discount": get_average_discount,
+    "get_average_shipping_charge": get_average_shipping_charge,
+    "get_average_tax": get_average_tax,
+    "get_statistical_summary": get_statistical_summary,
+    "get_percentile": get_percentile,
+    "get_top_percentile": get_top_percentile,
+    "get_bottom_percentile": get_bottom_percentile,
+    "get_correlation_matrix": get_correlation_matrix,
+    "get_conversion_rate": get_conversion_rate,
+    "get_cod_vs_prepaid_metrics": get_cod_vs_prepaid_metrics,
+    "get_geographic_insights": get_geographic_insights,
+    "get_common_metrics": get_common_metrics,
 }
 
 

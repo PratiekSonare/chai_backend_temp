@@ -25,7 +25,7 @@ DEFAULT_PREFIX = "orders"
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M:%S"
 DEFAULT_AWS_REGION = "ap-south-1"
-DEFAULT_DYNAMODB_TABLE = "history-orders-latest-4"
+DEFAULT_DYNAMODB_TABLE = "history-orders-final"
 PRIMARY_KEY_FIELD = "invoice_id"
 DEFAULT_DDB_BATCH_SIZE = 25
 REQUIRED_COLUMNS = [
@@ -51,6 +51,10 @@ REQUIRED_COLUMNS = [
     "state",
     "size",
     "suborder_size",
+    "suborder_selling_price",
+    "suborder_cost",
+    "suborder_mrp",
+    "suborder_productName"
 ]
 
 
@@ -328,6 +332,22 @@ def _project_order_for_dynamodb(
         "suborder_size": _pick_first_non_empty(
             order.get("suborder_size"),
             first_sub.get("size"),
+        ),
+        "suborder_selling_price": _pick_first_non_empty(
+            order.get("suborder_selling_price"),
+            first_sub.get("selling_price")
+        ),
+        "suborder_cost": _pick_first_non_empty(
+            order.get("suborder_cost"),
+            first_sub.get("cost"),
+        ),
+        "suborder_mrp": _pick_first_non_empty(
+            order.get("suborder_mrp"),
+            first_sub.get("mrp"),
+        ),
+        "suborder_productName": _pick_first_non_empty(
+            order.get("suborder_productName"),
+            first_sub.get("productName"),
         ),
     }
 

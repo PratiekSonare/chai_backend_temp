@@ -1,0 +1,1 @@
+pkill -f "uvicorn app:app" && pkill -f "celery -A celery_app.celery_app worker"
