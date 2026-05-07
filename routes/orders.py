@@ -2,8 +2,9 @@ import pandas as pd
 import numpy as np
 from fastapi import APIRouter, HTTPException
 from datetime import datetime
-from models import OrdersMetricsRequest
+from models import OrdersMetricsRequest, DateRangeOrdersRequest, OrderType
 from utils.type_converters import convert_numpy_types
+from tools import get_all_orders
 
 router = APIRouter()
 
@@ -27,11 +28,15 @@ def calculate_orders_metrics(request: OrdersMetricsRequest):
         
         # Convert to DataFrame for easier processing
         df = pd.DataFrame(orders_data)
+
+        # print("columns: ", df.columns, flush=True)
         
         # Flatten suborders data
         suborders_list = []
         for _, order in df.iterrows():
             if 'suborders' in order and order['suborders']:
+                order_status = str(order.get('order_status_id', '')).strip().lower()
+                is_cancelled_order = order_status == 9
                 for suborder in order['suborders']:
                     suborder_row = {
                         'sku': suborder.get('sku'),
@@ -40,7 +45,8 @@ def calculate_orders_metrics(request: OrdersMetricsRequest):
                         'cost': suborder.get('cost', 0),
                         'mrp': suborder.get('mrp', 0),
                         'item_quantity': suborder.get('item_quantity', 0),
-                        'cancelled_quantity': suborder.get('cancelled_quantity', 0),
+                        # Treat the full suborder quantity as cancelled when parent order is cancelled.
+                        'cancelled_quantity': suborder.get('item_quantity', 0) if is_cancelled_order else 0,
                         'shipped_quantity': suborder.get('shipped_quantity', 0),
                         'suborder_history': suborder.get('suborder_history', {}),
                         'order_date': order.get('order_date')
@@ -70,6 +76,7 @@ def calculate_orders_metrics(request: OrdersMetricsRequest):
         # ============ VOLUME METRICS ============
         total_orders = len(df)
         
+
         if not suborders_df.empty:
             total_skus_sold = suborders_df['shipped_quantity'].sum()
             net_skus_sold = suborders_df['item_quantity'].sum() - suborders_df['cancelled_quantity'].sum()
@@ -250,6 +257,66 @@ def calculate_orders_metrics(request: OrdersMetricsRequest):
                 "success": False,
                 "error": f"Error calculating metrics: {str(e)}"
             }
+        )
+
+@router.post('/orders/by-date-range')
+def get_orders_by_date_range(request: DateRangeOrdersRequest):
+    """
+    Fetch orders for a date range and calculate metrics.
+
+    Request body:
+    {
+        "start_date": "YYYY-MM-DD",
+        "end_date": "YYYY-MM-DD",
+        "order_type": "B2B" (optional)
+    }
+
+    Response: Orders data and calculated metrics
+    """
+    try:
+        # Convert dates to the format expected by get_all_orders (YYYY-MM-DD HH:MM:SS)
+        start_datetime = f"{request.start_date} 00:00:00"
+        end_datetime = f"{request.end_date} 23:59:59"
+
+        # Fetch orders from S3
+        orders = get_all_orders(start_datetime, end_datetime)
+
+        # Filter by order_type if provided
+        if request.order_type and orders:
+            normalized_type = OrderType.normalize(request.order_type)
+            if normalized_type:
+                orders = [order for order in orders if order.get('order_type') == normalized_type]
+
+        if not orders:
+            return convert_numpy_types({
+                "success": True,
+                "orders": [],
+                "metrics": None,
+                "message": f"No orders found for date range {request.start_date} to {request.end_date}" +
+                          (f" with order_type {request.order_type}" if request.order_type else "")
+            })
+
+        # Calculate metrics on the fetched orders
+        metrics_request = OrdersMetricsRequest(orders=orders)
+        metrics_response = calculate_orders_metrics(metrics_request)
+
+        print('metrics: ', metrics_response, flush=True);
+        return convert_numpy_types({
+            "success": True,
+            "orders": orders,
+            "metrics": metrics_response,
+            "total_orders": len(orders)
+        })
+        
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={"success": False, "error": str(e)}
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={"success": False, "error": f"Error fetching orders: {str(e)}"}
         )
 
 @router.post('/orders/chart/count')

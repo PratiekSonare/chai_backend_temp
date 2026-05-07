@@ -378,12 +378,12 @@ def convert_to_df(raw: list) -> pd.DataFrame:
 
     df = pd.json_normalize(exploded_rows)
 
-    print("========================")
-    print("columns:", list(df.columns), flush=True)
-    print("========================")
-    print("normalized dataframe: ")
-    print(df.head(5), flush=True)
-    print("========================")
+    # print("========================")
+    # print("columns:", list(df.columns), flush=True)
+    # print("========================")
+    # print("normalized dataframe: ")
+    # print(df.head(5), flush=True)
+    # print("========================")
 
     return df
 

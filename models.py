@@ -89,6 +89,12 @@ class GeographyRequest(BaseModel):
     orders: List[Dict[str, Any]]
     state: str
 
+class DateRangeOrdersRequest(BaseModel):
+    """Request model for fetching orders by date range"""
+    start_date: str  # Format: YYYY-MM-DD
+    end_date: str    # Format: YYYY-MM-DD
+    order_type: Optional[str] = None  # Optional: B2B, B2C, B2B2C
+
 class HistoryOrdersRequest(BaseModel):
     """Request model for historical orders queries from DyanmoDB"""
     table_name: str = "history-orders-final"

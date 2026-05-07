@@ -161,6 +161,7 @@ def _apply_client_side_filters(
         'courier',
         'import_warehouse_name',
         'state',
+        'order_type',
     }
 
     for key in client_filter_fields:

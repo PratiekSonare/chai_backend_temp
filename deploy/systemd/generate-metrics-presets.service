@@ -1,0 +1,15 @@
+[Unit]
+Description=Generate pre-calculated metrics presets and upload to S3
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/chupps/backend
+ExecStart=/home/ubuntu/chupps/backend/run_generate_metrics_daily.sh
+StandardOutput=append:/var/log/generate-metrics.log
+StandardError=append:/var/log/generate-metrics.log
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Generate pre-calculated metrics presets daily
+
+[Timer]
+# Runs at 00:10:30 UTC, right after orders extraction (00:10:00)
+OnCalendar=*-*-* 00:10:30
+Persistent=true
+Unit=generate-metrics-presets.service
+
+[Install]
+WantedBy=timers.target
