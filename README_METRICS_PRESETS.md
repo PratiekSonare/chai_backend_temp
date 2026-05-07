@@ -15,7 +15,7 @@ This system pre-calculates metrics for 7-day, 30-day, and all-time presets daily
 ### Data Flow
 
 ```
-DynamoDB (history-orders-dev)
+DynamoDB (history-orders-final)
     ↓
 [generate_metrics_presets.py] (00:10:30 UTC)
     ↓
@@ -115,7 +115,7 @@ METRICS_PRESETS_PREFIX=metrics-presets             # S3 key prefix
 METRICS_S3_REGION=ap-south-1                       # AWS region
 
 # DynamoDB Configuration
-HISTORY_ORDERS_DYNAMODB_TABLE=history-orders-dev   # Source table
+HISTORY_ORDERS_DYNAMODB_TABLE=history-orders-final   # Source table
 HISTORY_CACHE_ALL_TIME_START=2025-09-01 00:00:00   # All-time preset start date
 
 # AWS Credentials (if not using IAM role)

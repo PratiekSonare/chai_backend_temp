@@ -29,6 +29,7 @@ cp .env.example .env
 ```
 
 Edit `.env` with your actual values:
+
 ```env
 # EasyEcom API
 EASYECOM_API_KEY=your_actual_api_key
@@ -53,15 +54,19 @@ Server will start on `https://${process.env.NEXT_PUBLIC_API_URL}`
 ## API Endpoints
 
 ### `GET /health`
+
 Health check endpoint
 
 ### `GET /examples`
+
 Get example queries you can try
 
 ### `POST /query`
+
 Process a natural language query
 
 **Request:**
+
 ```json
 {
   "query": "Show me orders from last 5 days with payment mode prepaid"
@@ -69,6 +74,7 @@ Process a natural language query
 ```
 
 **Response (Standard Query):**
+
 ```json
 {
   "success": true,
@@ -80,6 +86,7 @@ Process a natural language query
 ```
 
 **Response (Comparison Query):**
+
 ```json
 {
   "success": true,
@@ -93,12 +100,14 @@ Process a natural language query
 ## Example Queries
 
 ### Standard Queries
+
 - "Show me orders from last 5 days with payment mode prepaid"
 - "Get all open orders from last week"
 - "Orders from Karnataka in last 10 days"
 - "Show COD orders from last 3 days"
 
 ### Comparison Queries
+
 - "Compare orders between Shopify13 and Flipkart from the last 10 days"
 - "Compare prepaid vs COD orders from last week"
 - "Compare Karnataka vs Maharashtra order volumes in last 15 days"
@@ -106,6 +115,7 @@ Process a natural language query
 ## Testing with cURL
 
 ### Standard Query
+
 ```bash
 curl -X POST https://${process.env.NEXT_PUBLIC_API_URL}/query \
   -H "Content-Type: application/json" \
@@ -115,6 +125,7 @@ curl -X POST https://${process.env.NEXT_PUBLIC_API_URL}/query \
 ```
 
 ### Comparison Query
+
 ```bash
 curl -X POST https://${process.env.NEXT_PUBLIC_API_URL}/query \
   -H "Content-Type: application/json" \
@@ -128,6 +139,7 @@ curl -X POST https://${process.env.NEXT_PUBLIC_API_URL}/query \
 ### Workflow Nodes
 
 **Standard Flow:**
+
 1. **Planning** → Analyzes query and creates execution plan
 2. **Execute Tool** → Fetches data from API with date windowing
 3. **Filtering** → Extracts filters from natural language
@@ -135,6 +147,7 @@ curl -X POST https://${process.env.NEXT_PUBLIC_API_URL}/query \
 5. **Return Result** → Returns filtered data
 
 **Comparison Flow:**
+
 1. **Planning** → Identifies comparison query
 2. **Grouping** → Extracts comparison dimensions
 3. **Parallel Fetch** → Fetches data for each group
@@ -146,19 +159,14 @@ curl -X POST https://${process.env.NEXT_PUBLIC_API_URL}/query \
 ## LLM Configuration
 
 This system uses **Llama 3.1 70B Instruct** via OpenRouter for:
+
 - **Planning**: Analyzing queries and creating execution plans
 - **Filtering**: Extracting filter conditions from natural language
 - **Grouping**: Identifying comparison dimensions
 - **Insights**: Generating natural language summaries
 
 The LLM is prompted with structured instructions to return JSON for parsing, ensuring reliable integration.
-ate Limiting**: Add rate limiting for API protection
-2. **Add Redis**: Replace in-memory cache with Redis for production
-3. **Error Handling**: Add comprehensive error handling and logging
-4. **Authentication**: Add authentication/authorization
-5. **Pagination**: Add pagination for large result sets
-6. **Async Processing**: Consider async processing for long-running queries
-7. **LLM Fallbacks**: Add fallback logic if LLM API fail)
+ate Limiting**: Add rate limiting for API protection 2. **Add Redis**: Replace in-memory cache with Redis for production 3. **Error Handling**: Add comprehensive error handling and logging 4. **Authentication**: Add authentication/authorization 5. **Pagination**: Add pagination for large result sets 6. **Async Processing**: Consider async processing for long-running queries 7. **LLM Fallbacks\*\*: Add fallback logic if LLM API fail)
 
 ## Production Considerations
 
@@ -167,7 +175,7 @@ ate Limiting**: Add rate limiting for API protection
 3. **Error Handling**: Add comprehensive error handling and logging
 4. **Rate Limiting**: Add rate limiting for API protection
 5. **Authentication**: Add authentication/authorization
-6. **Pagproviders.py    # OpenRouterion for large result sets
+6. \*\*Pagproviders.py # OpenRouterion for large result sets
 7. **Async Processing**: Consider async processing for long-running queries
 
 ## Celery + Redis Preset KPI Cache
@@ -198,7 +206,7 @@ Body (optional):
 
 ```json
 {
-  "table_name": "history-orders-dev",
+  "table_name": "history-orders-final",
   "invalidate": true
 }
 ```

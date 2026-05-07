@@ -27,7 +27,7 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from decimal import Decimal
 from typing import Dict, List, Any, Optional, Tuple
 
@@ -40,7 +40,7 @@ from dotenv import load_dotenv
 DEFAULT_BUCKET = "chupps-data-portal"
 DEFAULT_PREFIX = "metrics-presets"
 DEFAULT_AWS_REGION = "ap-south-1"
-DEFAULT_DYNAMODB_TABLE = "history-orders-dev"
+DEFAULT_DYNAMODB_TABLE = "history-orders-final"
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M:%S"
 
@@ -862,7 +862,7 @@ def generate_metrics_for_date(
     print(f"\n=== Generating metrics for {execution_date} ===")
     
     result = {
-        "_execution_timestamp": datetime.utcnow().isoformat() + "Z",
+        "_execution_timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "_execution_date": execution_date.isoformat(),
         "_fallback_date": False
     }
@@ -894,14 +894,14 @@ def generate_metrics_for_date(
                         "qualityRiskMetrics": {},
                         "advancedMetrics": {}
                     },
-                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                    "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
                 }
             else:
                 metrics = calculate_metrics_for_preset(df)
                 result[preset] = {
                     "success": True,
                     "data": metrics,
-                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                    "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
                 }
         
         except Exception as e:
@@ -909,7 +909,7 @@ def generate_metrics_for_date(
             result[preset] = {
                 "success": False,
                 "error": str(e),
-                "timestamp": datetime.utcnow().isoformat() + "Z"
+                "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             }
     
     return result

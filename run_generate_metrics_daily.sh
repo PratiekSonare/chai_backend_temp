@@ -30,7 +30,7 @@ EXECUTION_DATE=$(date -d "yesterday" +%Y-%m-%d)
 AWS_REGION="${AWS_REGION:-ap-south-1}"
 METRICS_BUCKET="${METRICS_PRESETS_BUCKET:-chupps-data-portal}"
 METRICS_PREFIX="${METRICS_PRESETS_PREFIX:-metrics-presets}"
-DDB_TABLE="${HISTORY_ORDERS_DYNAMODB_TABLE:-history-orders-dev}"
+DDB_TABLE="${HISTORY_ORDERS_DYNAMODB_TABLE:-history-orders-final}"
 
 echo "=========================================="
 echo "Generating metrics presets for $EXECUTION_DATE"
