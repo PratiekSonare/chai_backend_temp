@@ -321,6 +321,45 @@ def calculate_metrics_for_preset(df: pd.DataFrame) -> Dict[str, Any]:
         "currency": "INR"
     }
     
+    # === BUILD CHART DATA FOR LINE CHARTS ===
+    # Generate time-series data for totalOrders and grossRevenue
+    try:
+        chart_type, labels, grouped_df, group_col = _build_time_groups(df)
+        
+        # Total Orders Chart Data
+        if not grouped_df.empty and 'order_id' in grouped_df.columns:
+            orders_by_date = grouped_df.groupby(group_col)['order_id'].nunique().sort_index()
+            orders_list = orders_by_date.tolist()
+            growth_rates = _calculate_growth_rates(orders_list)
+            chart_data_orders = [
+                {
+                    "date": label, 
+                    "totalOrders": int(value),
+                    "growth": growth,
+                    "count": int(value)
+                }
+                for label, value, growth in zip(labels, orders_list, growth_rates)
+            ]
+            primaryKpis['totalOrders']['chart'] = chart_data_orders
+        
+        # Gross Revenue Chart Data
+        if not grouped_df.empty and 'total_amount' in grouped_df.columns:
+            revenue_by_date = grouped_df.groupby(group_col)['total_amount'].sum().sort_index()
+            revenue_list = revenue_by_date.tolist()
+            growth_rates = _calculate_growth_rates(revenue_list)
+            chart_data_revenue = [
+                {
+                    "date": label, 
+                    "grossRevenue": float(value),
+                    "growth": growth,
+                    "revenue": float(value)
+                }
+                for label, value, growth in zip(labels, revenue_list, growth_rates)
+            ]
+            primaryKpis['grossRevenue']['chart'] = chart_data_revenue
+    except Exception as e:
+        print(f"Warning: Could not generate chart data: {str(e)}", flush=True)
+    
     aov = float(df["total_amount"].mean()) if "total_amount" in df.columns else 0.0
     primaryKpis["aov"] = {
         "success": True,

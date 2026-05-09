@@ -49,6 +49,8 @@ REQUIRED_COLUMNS = [
     'import_warehouse_name', 
     'billing_state',         
     "state",
+    "city",
+    "pin_code",
     "size",
     "suborder_size",
     "suborder_selling_price",
@@ -240,6 +242,9 @@ def create_dynamodb_client(region_name: str):
 
 def _normalize_for_dynamodb(value):
     """Convert Python values to DynamoDB-serializable primitives."""
+    # Preserve strings as-is
+    if isinstance(value, str):
+        return value
     if isinstance(value, float):
         return Decimal(str(value))
     if isinstance(value, int):
@@ -260,64 +265,40 @@ def _serialize_item_for_client(item: Dict, serializer: TypeSerializer) -> Dict:
     return {k: serializer.serialize(v) for k, v in normalized_item.items()}
 
 
-def _first_suborder(order: Dict) -> Dict:
-    suborders = order.get("suborders")
-    if isinstance(suborders, list) and suborders and isinstance(suborders[0], dict):
-        return suborders[0]
-    return {}
-
-
-def _pick_first_non_empty(*values):
-    for value in values:
-        if value not in (None, "", [], {}):
-            return value
-    return None
-
-
-def _project_order_for_dynamodb(
+def _project_suborder_for_dynamodb(
     order: Dict,
+    suborder: Dict,
     source_tag: str,
     source_month: str,
     primary_key: str,
+    suborder_index: int = 1,
 ) -> Dict:
-    first_sub = _first_suborder(order)
+    """Project a single suborder as a complete DynamoDB row with unique invoice_id."""
+    original_invoice_id = order.get(primary_key)
+    
+    # Ensure primary key is always a string for DynamoDB schema compatibility
+    # Append suffix to invoice_id to ensure uniqueness (invoice_id_1, invoice_id_2, etc.)
+    if suborder_index > 1:
+        unique_invoice_id = f"{original_invoice_id}_{suborder_index}"
+    else:
+        # Always convert to string to match DynamoDB String type
+        unique_invoice_id = str(original_invoice_id)
 
     projected = {
-        primary_key: order.get(primary_key),
+        primary_key: unique_invoice_id,
         "source_file": source_tag,
         "source_month": source_month,
-        "order_id": order.get("order_id"),
+        "order_id": order.get("order_id"),  # Link back to original order
         "order_date": order.get("order_date"),
         "total_amount": order.get("total_amount"),
-        "item_quantity": _pick_first_non_empty(
-            order.get("item_quantity"),
-            first_sub.get("item_quantity"),
-        ),
-        "suborder_model_no": _pick_first_non_empty(
-            order.get("suborder_model_no"),
-            first_sub.get("suborder_model_no"),
-        ),
-        "suborder_quantity": _pick_first_non_empty(
-            order.get("suborder_quantity"),
-            first_sub.get("suborder_quantity"),
-        ),
+        "item_quantity": suborder.get("item_quantity"),
+        "suborder_model_no": suborder.get("suborder_model_no"),
+        "suborder_quantity": suborder.get("suborder_quantity"),
         "order_quantity": order.get("order_quantity"),
-        "sku": _pick_first_non_empty(
-            order.get("sku"),
-            first_sub.get("sku"),
-        ),
-        "suborder_sku": _pick_first_non_empty(
-            order.get("suborder_sku"),
-            first_sub.get("sku"),
-        ),
-        "suborder_marketplace_sku": _pick_first_non_empty(
-            order.get("suborder_marketplace_sku"),
-            first_sub.get("marketplace_sku"),
-        ),
-        "marketplace_sku": _pick_first_non_empty(
-            order.get("marketplace_sku"),
-            first_sub.get("marketplace_sku"),
-        ),
+        "sku": suborder.get("sku"),
+        "suborder_sku": suborder.get("sku"),
+        "suborder_marketplace_sku": suborder.get("marketplace_sku"),
+        "marketplace_sku": suborder.get("marketplace_sku"),
         "order_status": order.get("order_status"),
         "payment_mode": order.get("payment_mode"),
         "order_type": order.get("order_type"),
@@ -325,42 +306,65 @@ def _project_order_for_dynamodb(
         "courier": order.get("courier"),
         "import_warehouse_name": order.get("import_warehouse_name"),
         "state": order.get("state"),
-        "size": _pick_first_non_empty(
-            order.get("size"),
-            first_sub.get("size"),
-        ),
-        "suborder_size": _pick_first_non_empty(
-            order.get("suborder_size"),
-            first_sub.get("size"),
-        ),
-        "suborder_selling_price": _pick_first_non_empty(
-            order.get("suborder_selling_price"),
-            first_sub.get("selling_price")
-        ),
-        "suborder_cost": _pick_first_non_empty(
-            order.get("suborder_cost"),
-            first_sub.get("cost"),
-        ),
-        "suborder_mrp": _pick_first_non_empty(
-            order.get("suborder_mrp"),
-            first_sub.get("mrp"),
-        ),
-        "suborder_productName": _pick_first_non_empty(
-            order.get("suborder_productName"),
-            first_sub.get("productName"),
-        ),
+        "billing_state": order.get("billing_state"),
+        "city": order.get("city"),
+        "pin_code": order.get("pin_code"),
+        "size": suborder.get("size"),
+        "suborder_size": suborder.get("size"),
+        "suborder_selling_price": suborder.get("selling_price"),
+        "suborder_cost": suborder.get("cost"),
+        "suborder_mrp": suborder.get("mrp"),
+        "suborder_productName": suborder.get("productName"),
     }
 
-    projected["canonical_sku"] = _pick_first_non_empty(
-        order.get("canonical_sku"),
-        projected.get("sku"),
-        projected.get("suborder_sku"),
-        projected.get("suborder_marketplace_sku"),
-        projected.get("marketplace_sku"),
-    )
+    projected["canonical_sku"] = suborder.get("sku") or order.get("canonical_sku")
 
     allowed = set(REQUIRED_COLUMNS + [primary_key, "source_file", "source_month"])
     return {k: v for k, v in projected.items() if k in allowed and v is not None}
+
+
+def _extract_rows_from_suborders(
+    order: Dict,
+    source_tag: str,
+    source_month: str,
+    primary_key: str,
+) -> List[Dict]:
+    """Extract one row per suborder. If no suborders, use order data with index 1."""
+    rows = []
+    suborders = order.get("suborders", [])
+    
+    if not isinstance(suborders, list):
+        suborders = []
+    
+    # If no suborders, create one row with the order's data
+    if not suborders:
+        row = _project_suborder_for_dynamodb(
+            order=order,
+            suborder=order,  # Use order data as fallback for suborder fields
+            source_tag=source_tag,
+            source_month=source_month,
+            primary_key=primary_key,
+            suborder_index=1,
+        )
+        # Only append if row has the primary key (not empty after filtering)
+        if row and primary_key in row:
+            rows.append(row)
+    else:
+        # Create one row per suborder, each with unique invoice_id
+        for idx, suborder in enumerate(suborders, start=1):
+            row = _project_suborder_for_dynamodb(
+                order=order,
+                suborder=suborder,
+                source_tag=source_tag,
+                source_month=source_month,
+                primary_key=primary_key,
+                suborder_index=idx,
+            )
+            # Only append if row has the primary key (not empty after filtering)
+            if row and primary_key in row:
+                rows.append(row)
+    
+    return rows
 
 
 def prepare_rows_for_dynamodb(
@@ -369,26 +373,25 @@ def prepare_rows_for_dynamodb(
     source_month: str,
     primary_key: str = PRIMARY_KEY_FIELD,
 ) -> List[Dict]:
-    """Prepare projected rows for DynamoDB upsert and validate key presence."""
+    """Prepare one row per suborder for DynamoDB upsert, preserving order relationships."""
     prepared_rows: List[Dict] = []
 
     for idx, order in enumerate(orders):
         if not isinstance(order, dict):
             continue
 
-        row = _project_order_for_dynamodb(
+        original_key = order.get(primary_key)
+        if original_key in (None, ""):
+            continue
+
+        # Extract one row per suborder (or one row if no suborders)
+        rows = _extract_rows_from_suborders(
             order=order,
             source_tag=source_key,
             source_month=source_month,
             primary_key=primary_key,
         )
-
-        if row.get(primary_key) in (None, ""):
-            raise ValueError(
-                f"Order at index {idx} is missing required primary key '{primary_key}'"
-            )
-
-        prepared_rows.append(row)
+        prepared_rows.extend(rows)
 
     return prepared_rows
 
@@ -398,6 +401,7 @@ def upsert_orders_into_dynamodb(
     table_name: str,
     rows: List[Dict],
     batch_size: int = DEFAULT_DDB_BATCH_SIZE,
+    primary_key: str = PRIMARY_KEY_FIELD,
 ) -> int:
     """Upsert rows into DynamoDB using batch_write_item PutRequest."""
     if not rows:
@@ -408,9 +412,31 @@ def upsert_orders_into_dynamodb(
 
     serializer = TypeSerializer()
     total_upserted = 0
+    skipped_rows = []
 
-    for i in range(0, len(rows), batch_size):
-        chunk = rows[i:i + batch_size]
+    # Filter rows: skip any that are missing the primary key or have empty/None key
+    valid_rows = []
+    for idx, row in enumerate(rows):
+        if not isinstance(row, dict):
+            skipped_rows.append(f"Row {idx}: not a dict")
+            continue
+        
+        key_value = row.get(primary_key)
+        if key_value is None or key_value == "":
+            skipped_rows.append(f"Row {idx}: missing or empty {primary_key}")
+            continue
+        
+        valid_rows.append(row)
+
+    if skipped_rows:
+        print(f"Skipped {len(skipped_rows)} invalid rows:")
+        for msg in skipped_rows[:10]:  # Show first 10 skipped rows
+            print(f"  - {msg}")
+        if len(skipped_rows) > 10:
+            print(f"  ... and {len(skipped_rows) - 10} more")
+
+    for i in range(0, len(valid_rows), batch_size):
+        chunk = valid_rows[i:i + batch_size]
         pending = {
             table_name: [
                 {"PutRequest": {"Item": _serialize_item_for_client(row, serializer)}}

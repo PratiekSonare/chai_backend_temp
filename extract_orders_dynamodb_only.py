@@ -43,6 +43,8 @@ REQUIRED_COLUMNS = [
     'courier',               
     'import_warehouse_name', 
     "state",
+    "city",
+    "pin_code",
     "size",
     "suborder_size",
     "suborder_size",
@@ -221,6 +223,8 @@ def _project_order_for_dynamodb(
         "courier": order.get("courier"),
         "import_warehouse_name": order.get("import_warehouse_name"),
         "state": order.get("state"),
+        "city": order.get("city"),
+        "pin_code": order.get("pin_code"),
         "size": _pick_first_non_empty(
             order.get("size"),
             first_sub.get("size"),
@@ -272,18 +276,16 @@ def prepare_rows_for_dynamodb(
         if not isinstance(order, dict):
             continue
 
+        original_key = order.get(primary_key)
+        if original_key in (None, ""):
+            continue
+
         row = _project_order_for_dynamodb(
             order=order,
             source_tag=source_tag,
             source_month=source_month,
             primary_key=primary_key,
         )
-
-        if row.get(primary_key) in (None, ""):
-            raise ValueError(
-                f"Order at index {idx} is missing required primary key '{primary_key}'"
-            )
-
         prepared_rows.append(row)
 
     return prepared_rows
