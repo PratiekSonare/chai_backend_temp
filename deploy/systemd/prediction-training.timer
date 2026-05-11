@@ -1,0 +1,15 @@
+[Unit]
+Description=Daily Order Status Prediction Model Training Timer
+Documentation=file:///home/pratiek/Downloads/chupps/ONLINE_LEARNING_ANALYSIS.md
+Requires=prediction-training.service
+
+[Timer]
+# Run at 01:00 AM daily (after daily order extraction at 00:00)
+OnCalendar=*-*-* 01:00:00
+Persistent=true
+
+# If system is down at scheduled time, run as soon as it starts
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

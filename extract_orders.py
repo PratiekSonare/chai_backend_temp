@@ -7,6 +7,7 @@ S3 output format:
 
 import argparse
 import json
+import logging
 import os
 import time
 from datetime import datetime, timedelta, date
@@ -17,6 +18,14 @@ import boto3
 import requests
 from boto3.dynamodb.types import TypeSerializer
 from dotenv import load_dotenv
+
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_BASE_URL = "https://api.easyecom.io"
@@ -483,11 +492,13 @@ def run_extraction(
     total_files = 0
     total_upserted = 0
 
+    logger.info(f"Starting extraction from {start_day} to {end_day} | S3: s3://{bucket_name}/{prefix} | DDB: {table_name} ({aws_region})")
+
     while current_day <= end_day:
         day_start = datetime.combine(current_day, datetime.min.time()).strftime(DATETIME_FMT)
         day_end = datetime.combine(current_day, datetime.max.time().replace(microsecond=0)).strftime(DATETIME_FMT)
 
-        print(f"\nProcessing {current_day}...")
+        logger.info(f"Processing date: {current_day} (time range: {day_start} to {day_end})")
         daily_orders = fetch_orders_for_window(
             start_date=day_start,
             end_date=day_end,
@@ -521,14 +532,10 @@ def run_extraction(
         total_files += 1
         total_upserted += upserted_count
 
-        print(f"Uploaded {day_count} orders to s3://{bucket_name}/{key}")
-        print(f"Upserted {upserted_count} rows into DynamoDB table '{table_name}'")
+        logger.info(f"✓ Completed {current_day}: fetched {day_count} orders | S3: {key} | DDB: {upserted_count} rows upserted")
         current_day += timedelta(days=1)
 
-    print("\nExtraction complete")
-    print(f"Files uploaded: {total_files}")
-    print(f"Total orders fetched: {total_orders}")
-    print(f"Total rows upserted: {total_upserted}")
+    logger.info(f"Extraction complete. Files: {total_files}, Total orders: {total_orders}, Total DDB rows: {total_upserted}")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

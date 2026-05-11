@@ -1,0 +1,26 @@
+[Unit]
+Description=Daily Order Status Prediction Model Training (Warm-Start GBDT)
+Documentation=file:///home/pratiek/Downloads/chupps/ONLINE_LEARNING_ANALYSIS.md
+After=network.target
+
+[Service]
+Type=oneshot
+User=pratiek
+WorkingDirectory=/home/pratiek/Downloads/chupps/backend
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/bin/bash /home/pratiek/Downloads/chupps/backend/run_prediction_training_daily.sh
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=prediction-train
+
+# Restart policy (don't restart for oneshot)
+Restart=no
+
+# Resource limits
+MemoryMax=2G
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

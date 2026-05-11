@@ -202,6 +202,50 @@ class PlanningLLM(GeminiLLM):
             return "Analyze product data"
         else:
             return "Analyze orders data"
+    
+    def _generate_fallback_plan(self, query: str, data_source: str) -> dict:
+        """Generate minimal execution plan when Gemini fails (fallback to basic fetch)"""
+        print(f"⚠️  [FALLBACK] Generating minimal plan for data_source={data_source}", flush=True)
+        
+        today = datetime.now()
+        current_date = today.strftime("%Y-%m-%d")
+        five_days_ago = today - timedelta(days=5)
+        
+        summarized = self._generate_fallback_summary(query)
+        
+        # Determine base tool based on data_source
+        if data_source == "profit":
+            base_tool = "get_vendor_cost_sheet"
+        elif data_source == "payment_cycle":
+            base_tool = "get_payment_cycle_data"
+        else:
+            base_tool = "get_all_orders"
+        
+        # Minimal 2-step plan: fetch data, no filtering (user can filter via post-processing)
+        fallback_plan = {
+            "summarized_query": summarized,
+            "query_type": "standard",
+            "steps": [
+                {
+                    "id": "step1",
+                    "tool": base_tool,
+                    "params": {} if data_source != "order" else {
+                        "start_date": f"{five_days_ago.strftime('%Y-%m-%d')} 00:00:00",
+                        "end_date": f"{today.strftime('%Y-%m-%d')} 23:59:59"
+                    },
+                    "depends_on": [],
+                    "save_as": f"{data_source}_raw"
+                }
+            ],
+            "manipulation": {"required": False, "type": None},
+            "base_params": {
+                "start_date": f"{five_days_ago.strftime('%Y-%m-%d')} 00:00:00",
+                "end_date": f"{today.strftime('%Y-%m-%d')} 23:59:59"
+            },
+            "tool": base_tool
+        }
+        
+        return fallback_plan
 
     def _get_execution_plan_schema(self) -> dict:
         """Return JSON schema for structured output (can also use ExecutionPlan.model_json_schema())"""
@@ -663,13 +707,32 @@ class PlanningLLM(GeminiLLM):
         except json.JSONDecodeError as e:
             print(f"[ERROR] Failed to parse JSON from Gemini: {e}")
             print(f"[DEBUG] Raw response: {response_text[:500]}...")
-            return {"success": False, "error": f"JSON parse error: {str(e)}"}
+            # Fallback to minimal plan on JSON parse error
+            fallback_plan = self._generate_fallback_plan(query, data_source)
+            return {
+                "success": True,
+                "plan": fallback_plan,
+                "summarized_query": fallback_plan["summarized_query"],
+                "warning": f"Using fallback plan due to JSON parse error: {str(e)}"
+            }
         except Exception as e:
             print(f"[ERROR] Planning failed: {e}")
-            return {"success": False, "error": str(e)}
+            # Fallback to minimal plan on any error
+            fallback_plan = self._generate_fallback_plan(query, data_source)
+            return {
+                "success": True,
+                "plan": fallback_plan,
+                "summarized_query": fallback_plan["summarized_query"],
+                "warning": f"Using fallback plan due to error: {str(e)}"
+            }
 
 class FilteringLLM(GeminiLLM):
     """Filtering LLM - extracts filter parameters from natural language"""
+    
+    def _generate_fallback_filters(self, query: str) -> dict:
+        """Fallback: return empty filters (no filtering applied)"""
+        print(f"⚠️  [FALLBACK] Filtering LLM failed, returning empty filters. Query: {query[:80]}...", flush=True)
+        return {"filters": []}
     
     def invoke(self, params: dict) -> dict:
         """Generate filter parameters"""
@@ -752,11 +815,16 @@ Return ONLY the JSON, no other text."""
             result = json.loads(response)
             return result
         except json.JSONDecodeError as e:
-            print(f"Failed to parse filter JSON: {e}\nResponse: {response}")
-            return {"filters": []}
+            print(f"⚠️  [FALLBACK] Failed to parse filter JSON: {e}\nResponse: {response}")
+            return self._generate_fallback_filters(params.get("query", ""))
 
 class GroupingLLM(GeminiLLM):
     """Grouping LLM - extracts comparison groups from query"""
+    
+    def _generate_fallback_groups(self, query: str) -> dict:
+        """Fallback: return empty groups (disables comparison)"""
+        print(f"⚠️  [FALLBACK] Grouping LLM failed, disabling comparison. Query: {query[:80]}...", flush=True)
+        return {"groups": []}
     
     def invoke(self, params: dict) -> dict:
         """
@@ -969,8 +1037,8 @@ Return ONLY the JSON, no other text."""
             result = json.loads(response)
             return result
         except json.JSONDecodeError as e:
-            print(f"Failed to parse grouping JSON: {e}\nResponse: {response}")
-            return {{"groups": []}}
+            print(f"⚠️  [FALLBACK] Failed to parse grouping JSON: {e}\nResponse: {response}")
+            return self._generate_fallback_groups(params.get("query", ""))
 
 class MetricLLM(GeminiLLM):
     """Metric analysis LLM - generates insights from calculated metrics"""
@@ -1204,8 +1272,7 @@ Be specific about correlations between news events and your sales data. All mone
 class InsightLLM(GeminiLLM):
     """Insight generation LLM - creates natural language summaries with market context"""
     
-    def invoke(self, params: dict) -> dict:
-        """Generate natural language insights for comparison and metric analysis with market context."""
+    def _generate_fallback_insights(self, query: str, metrics: dict = None, analysis_mode: str = \"standard\") -> dict:\n        \"\"\"Fallback: generate basic text summary when Gemini fails\"\"\"\n        print(f\"⚠️  [FALLBACK] Insight LLM failed, generating basic insights. Mode: {analysis_mode}\", flush=True)\n        \n        if analysis_mode == \"comparison\" and isinstance(metrics, dict):\n            # Basic comparison summary\n            insights = \"Comparison analysis completed. See comparison_data field for detailed results.\"\n        elif analysis_mode in [\"metric_analysis\", \"custom_metric_generation\"] and isinstance(metrics, dict):\n            # Basic metric analysis summary\n            num_metrics = len(metrics.get(\"overall\", {}))\n            insights = f\"Metric analysis completed with {num_metrics} calculated metrics. Review metrics field for detailed values.\"\n        else:\n            # Basic standard query summary\n            insights = \"Query analysis completed. Review returned data for detailed results.\"\n        \n        return {\n            \"success\": True,\n            \"insights\": insights,\n            \"analysis\": insights,\n            \"warning\": \"Using fallback insights due to LLM failure\"\n        }\n    \n    def invoke(self, params: dict) -> dict:\n        \"\"\"Generate natural language insights for comparison and metric analysis with market context.\"\"\"\n        try:
         query = params.get("query", "")
         comparison = params.get("comparison", {})
         metrics = params.get("metrics", {})

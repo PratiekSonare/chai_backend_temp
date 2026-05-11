@@ -4,6 +4,7 @@ This variant intentionally skips S3 writes to avoid duplicate storage.
 """
 
 import argparse
+import logging
 import os
 import time
 from datetime import date, datetime, timedelta
@@ -14,6 +15,14 @@ import boto3
 import requests
 from boto3.dynamodb.types import TypeSerializer
 from dotenv import load_dotenv
+
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_BASE_URL = "https://api.easyecom.io"
@@ -352,11 +361,13 @@ def run_extraction(
     total_orders = 0
     total_upserted = 0
 
+    logger.info(f"Starting extraction from {start_day} to {end_day} in table '{table_name}' ({aws_region})")
+
     while current_day <= end_day:
         day_start = datetime.combine(current_day, datetime.min.time()).strftime(DATETIME_FMT)
         day_end = datetime.combine(current_day, datetime.max.time().replace(microsecond=0)).strftime(DATETIME_FMT)
 
-        print(f"\nProcessing {current_day}...")
+        logger.info(f"Processing date: {current_day} (time range: {day_start} to {day_end})")
         daily_orders = fetch_orders_for_window(
             start_date=day_start,
             end_date=day_end,
@@ -382,13 +393,10 @@ def run_extraction(
         total_orders += day_count
         total_upserted += upserted_count
 
-        print(f"Fetched {day_count} orders")
-        print(f"Upserted {upserted_count} rows into DynamoDB table '{table_name}'")
+        logger.info(f"✓ Completed {current_day}: fetched {day_count} orders, upserted {upserted_count} rows")
         current_day += timedelta(days=1)
 
-    print("\nExtraction complete")
-    print(f"Total orders fetched: {total_orders}")
-    print(f"Total rows upserted: {total_upserted}")
+    logger.info(f"Extraction complete. Total orders fetched: {total_orders}, Total rows upserted: {total_upserted}")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
