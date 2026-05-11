@@ -59,7 +59,7 @@ class RequestTimer:
         return not is_tight
     
     def record_stage(self, stage: str) -> float:
-        \"\"\"Record completion of a stage and return elapsed time for this stage\"\"\"
+        """Record completion of a stage and return elapsed time for this stage"""
         current_time = time.time()
         stage_elapsed = current_time - (
             self.start_time + sum(self.stage_times.values())
@@ -69,7 +69,7 @@ class RequestTimer:
         return stage_elapsed
     
     def get_summary(self) -> dict:
-        \"\"\"Get timing summary\"\"\"
+        """Get timing summary"""
         return {
             "request_id": self.request_id,
             "total_elapsed_ms": self.elapsed_ms(),
@@ -87,7 +87,7 @@ async def call_with_timeout(
     request_timer: Optional[RequestTimer] = None,
     request_id: str = "unknown"
 ) -> Any:
-    \"\"\"
+    """
     Call an async function or coroutine with timeout and fallback.
     
     Args:
@@ -100,7 +100,7 @@ async def call_with_timeout(
     
     Returns:
         Result from function or fallback_result on timeout
-    \"\"\"
+    """
     # Check if we have time budget remaining
     if request_timer and not request_timer.check_budget(stage_name, timeout_ms):
         print(f"⚠️  [FALLBACK] Skipping {stage_name} - insufficient time budget", flush=True)
@@ -138,14 +138,14 @@ def timeout_decorator(
     timeout_ms: int = 5000,
     fallback_return: Any = None
 ):
-    \"\"\"
+    """
     Decorator to add timeout to an async function.
     
     Usage:
         @timeout_decorator(timeout_ms=5000, fallback_return={})
         async def my_function():
             ...
-    \"\"\"
+    """
     def decorator(func: Callable) -> Callable:
         @wraps(func)
         async def wrapper(*args, **kwargs):
@@ -164,7 +164,7 @@ def create_llm_timeout_wrapper(
     timeout_ms: int = 5000,
     request_id: str = "unknown"
 ) -> Callable:
-    \"\"\"
+    """
     Create a wrapper function that calls an LLM's invoke method with timeout.
     
     This is useful for synchronous LLM calls that need timeout handling.
@@ -176,7 +176,7 @@ def create_llm_timeout_wrapper(
             request_id=request_id
         )
         result = wrapped_planning_llm(query, data_source)
-    \"\"\"
+    """
     @wraps(llm_invoke_func)
     def wrapper(*args, **kwargs):
         try:

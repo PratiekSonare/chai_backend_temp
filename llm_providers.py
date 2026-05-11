@@ -1272,22 +1272,43 @@ Be specific about correlations between news events and your sales data. All mone
 class InsightLLM(GeminiLLM):
     """Insight generation LLM - creates natural language summaries with market context"""
     
-    def _generate_fallback_insights(self, query: str, metrics: dict = None, analysis_mode: str = \"standard\") -> dict:\n        \"\"\"Fallback: generate basic text summary when Gemini fails\"\"\"\n        print(f\"⚠️  [FALLBACK] Insight LLM failed, generating basic insights. Mode: {analysis_mode}\", flush=True)\n        \n        if analysis_mode == \"comparison\" and isinstance(metrics, dict):\n            # Basic comparison summary\n            insights = \"Comparison analysis completed. See comparison_data field for detailed results.\"\n        elif analysis_mode in [\"metric_analysis\", \"custom_metric_generation\"] and isinstance(metrics, dict):\n            # Basic metric analysis summary\n            num_metrics = len(metrics.get(\"overall\", {}))\n            insights = f\"Metric analysis completed with {num_metrics} calculated metrics. Review metrics field for detailed values.\"\n        else:\n            # Basic standard query summary\n            insights = \"Query analysis completed. Review returned data for detailed results.\"\n        \n        return {\n            \"success\": True,\n            \"insights\": insights,\n            \"analysis\": insights,\n            \"warning\": \"Using fallback insights due to LLM failure\"\n        }\n    \n    def invoke(self, params: dict) -> dict:\n        \"\"\"Generate natural language insights for comparison and metric analysis with market context.\"\"\"\n        try:
-        query = params.get("query", "")
-        comparison = params.get("comparison", {})
-        metrics = params.get("metrics", {})
-        raw_metrics = params.get("raw_metrics", {})
-        date_range = params.get("date_range", {})
-        analysis_mode = params.get("analysis_mode", "comparison")
+    def _generate_fallback_insights(self, query: str, metrics: dict = None, analysis_mode: str = "standard") -> dict:
+        """Fallback: generate basic text summary when Gemini fails"""
+        print(f"⚠️  [FALLBACK] Insight LLM failed, generating basic insights. Mode: {analysis_mode}", flush=True)
         
-        # Get market context from news
-        market_context = ""
-        print(f"DEBUG: date_range = {date_range}", flush=True)
-        print(f"DEBUG: should_include_news_context = {self._should_include_news_context(query)}", flush=True)
-        print(f"DEBUG: condition check = {date_range and self._should_include_news_context(query)}", flush=True)
+        if analysis_mode == "comparison" and isinstance(metrics, dict):
+            # Basic metric analysis summary
+            num_metrics = len(metrics.get("overall", {}))
+            insights = f"Metric analysis completed with {num_metrics} calculated metrics. Review metrics field for detailed values."
+        else:
+            # Basic standard query summary
+            insights = "Query analysis completed. Review returned data for detailed results."
         
-        if date_range and self._should_include_news_context(query):
-            print("DEBUG: Entering news context fetch block", flush=True)
+        return {
+            "success": True,
+            "insights": insights,
+            "analysis": insights,
+            "warning": "Using fallback insights due to LLM failure"
+        }
+    
+    def invoke(self, params: dict) -> dict:
+        """Generate natural language insights for comparison and metric analysis with market context."""
+        try:
+            query = params.get("query", "")
+            comparison = params.get("comparison", {})
+            metrics = params.get("metrics", {})
+            raw_metrics = params.get("raw_metrics", {})
+            date_range = params.get("date_range", {})
+            analysis_mode = params.get("analysis_mode", "comparison")
+            
+            # Get market context from news
+            market_context = ""
+            print(f"DEBUG: date_range = {date_range}", flush=True)
+            print(f"DEBUG: should_include_news_context = {self._should_include_news_context(query)}", flush=True)
+            print(f"DEBUG: condition check = {date_range and self._should_include_news_context(query)}", flush=True)
+            
+            if date_range and self._should_include_news_context(query):
+                print("DEBUG: Entering news context fetch block", flush=True)
             try:
                 print("DEBUG: Creating NewsRetrievalLLM instance", flush=True)
                 news_llm = NewsRetrievalLLM()
@@ -1303,7 +1324,7 @@ class InsightLLM(GeminiLLM):
             except Exception as e:
                 print(f"News context fetch failed: {e}", flush=True)
                 market_context = ""
-        else:
+        except:
             print("DEBUG: Skipping news context fetch due to condition check", flush=True)
         
         if analysis_mode == "metric_analysis":
