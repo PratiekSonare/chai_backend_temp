@@ -1,7 +1,8 @@
 import pandas as pd
 from fastapi import APIRouter, HTTPException
-from models import OrdersMetricsRequest
+from models import OrdersMetricsRequest, DateRangeOrdersRequest
 from utils.type_converters import convert_numpy_types
+from tools import get_all_orders
 
 router = APIRouter()
 
@@ -145,3 +146,95 @@ def cancellation_bar_chart(request: OrdersMetricsRequest):
                 "error": f"Error generating cancellation chart data: {str(e)}"
             }
         )
+
+
+@router.post('/cancellation/rto')
+def rto_dashboard(request: DateRangeOrdersRequest):
+    """
+    RTO dashboard endpoint.
+    Returns separated payloads for cancelled and returned orders within date range,
+    plus per-section top states and pincodes and totals.
+    """
+    try:
+        start_datetime = f"{request.start_date} 00:00:00"
+        end_datetime = f"{request.end_date} 23:59:59"
+
+        orders = get_all_orders(start_datetime, end_datetime)
+
+        if not orders:
+            return convert_numpy_types({
+                "success": True,
+                "start_date": request.start_date,
+                "end_date": request.end_date,
+                "totals": {"orders": 0, "cancelled": 0, "returned": 0},
+                "cancelled": {"count": 0, "top_states": [], "top_pincodes": [], "orders": []},
+                "returned": {"count": 0, "top_states": [], "top_pincodes": [], "orders": []}
+            })
+
+        import pandas as pd
+
+        df = pd.DataFrame(orders)
+
+        # Normalize status
+        status_series = df['order_status'].astype(str).str.strip().str.lower() if 'order_status' in df.columns else pd.Series([''] * len(df))
+
+        cancelled_mask = status_series.str.contains('cancel', na=False)
+        returned_mask = status_series.str.contains('return|rto', na=False)
+
+        cancelled_df = df[cancelled_mask]
+        returned_df = df[returned_mask]
+
+        def top_counts(series, key_name='key', top_n=10):
+            if series is None or series.empty:
+                return []
+            vc = series.fillna('UNKNOWN').astype(str).str.strip().value_counts().head(top_n)
+            return [{key_name: k, 'count': int(v)} for k, v in vc.items()]
+
+        # Determine pincode column name variants
+        pincode_col = None
+        for candidate in ['pin_code', 'pincode', 'pin', 'pinCode', 'postal_code']:
+            if candidate in df.columns:
+                pincode_col = candidate
+                break
+
+        cancelled_top_states = top_counts(cancelled_df['state']) if 'state' in cancelled_df.columns else []
+        returned_top_states = top_counts(returned_df['state']) if 'state' in returned_df.columns else []
+
+        cancelled_top_pincodes = top_counts(cancelled_df[pincode_col], key_name='pincode') if pincode_col and pincode_col in cancelled_df.columns else []
+        returned_top_pincodes = top_counts(returned_df[pincode_col], key_name='pincode') if pincode_col and pincode_col in returned_df.columns else []
+
+        # Limit orders list to reasonable size for response
+        max_rows = 1000
+        cancelled_orders = cancelled_df.to_dict(orient='records')[:max_rows]
+        returned_orders = returned_df.to_dict(orient='records')[:max_rows]
+
+        totals = {
+            'orders': int(len(df)),
+            'cancelled': int(len(cancelled_df)),
+            'returned': int(len(returned_df))
+        }
+
+        return convert_numpy_types({
+            'success': True,
+            'start_date': request.start_date,
+            'end_date': request.end_date,
+            'totals': totals,
+            'cancelled': {
+                'count': totals['cancelled'],
+                'top_states': cancelled_top_states,
+                'top_pincodes': cancelled_top_pincodes,
+                'orders': cancelled_orders
+            },
+            'returned': {
+                'count': totals['returned'],
+                'top_states': returned_top_states,
+                'top_pincodes': returned_top_pincodes,
+                'orders': returned_orders
+            }
+        })
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={
+            'success': False,
+            'error': f'Error generating RTO dashboard: {str(e)}'
+        })

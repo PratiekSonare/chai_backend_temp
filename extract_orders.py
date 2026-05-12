@@ -301,7 +301,7 @@ def _project_suborder_for_dynamodb(
         "order_date": order.get("order_date"),
         "total_amount": order.get("total_amount"),
         "item_quantity": suborder.get("item_quantity"),
-        "suborder_model_no": suborder.get("suborder_model_no"),
+        "suborder_model_no": suborder.get("model_no"),
         "suborder_quantity": suborder.get("suborder_quantity"),
         "order_quantity": order.get("order_quantity"),
         "sku": suborder.get("sku"),

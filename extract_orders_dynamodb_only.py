@@ -1,18 +1,20 @@
-"""Extract daily orders from EasyEcom API and upsert directly to DynamoDB.
+"""Extract daily orders from S3 bucket and upsert directly to DynamoDB.
 
-This variant intentionally skips S3 writes to avoid duplicate storage.
+Orders are stored in S3 with structure: {bucket}/{YYYY-MM}/{YYYY-MM-DD}.json
+This script scans a date range and uploads all matching orders to DynamoDB.
 """
 
 import argparse
+import json
 import logging
 import os
+import re
 import time
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Dict, List
 
 import boto3
-import requests
 from boto3.dynamodb.types import TypeSerializer
 from dotenv import load_dotenv
 
@@ -25,9 +27,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_BASE_URL = "https://api.easyecom.io"
 DATE_FMT = "%Y-%m-%d"
-DATETIME_FMT = "%Y-%m-%d %H:%M:%S"
+DEFAULT_BUCKET = "chupps-data-portal"
+DEFAULT_PREFIX = "orders"
 DEFAULT_DYNAMODB_TABLE = "history-orders-final"
 DEFAULT_AWS_REGION = "ap-south-1"
 PRIMARY_KEY_FIELD = "invoice_id"
@@ -48,19 +50,19 @@ REQUIRED_COLUMNS = [
     "order_status",
     "payment_mode",
     "order_type",
-    'marketplace',           
-    'courier',               
-    'import_warehouse_name', 
+    "marketplace",
+    "courier",
+    "import_warehouse_name",
+    "billing_state",
     "state",
     "city",
     "pin_code",
     "size",
     "suborder_size",
-    "suborder_size",
     "suborder_selling_price",
     "suborder_cost",
     "suborder_mrp",
-    "suborder_productName"
+    "suborder_productName",
 ]
 
 
@@ -73,72 +75,9 @@ def parse_date(value: str) -> date:
     return datetime.strptime(value, DATE_FMT).date()
 
 
-def fetch_orders_for_window(
-    start_date: str,
-    end_date: str,
-    api_key: str,
-    jwt_token: str,
-    base_url: str,
-) -> List[Dict]:
-    """Fetch all orders for a date window with pagination support."""
-    all_orders: List[Dict] = []
-    url = f"{base_url}/orders/V2/getAllOrders"
-
-    params = {
-        "limit": 250,
-        "start_date": start_date,
-        "end_date": end_date,
-    }
-
-    headers = {
-        "x-api-key": api_key,
-        "Authorization": f"Bearer {jwt_token}",
-        "Content-Type": "application/json",
-    }
-
-    page = 1
-
-    while True:
-        print(f"Fetching page {page} for {start_date} to {end_date}")
-        response = requests.get(url, params=params, headers=headers, timeout=60)
-
-        # API behavior in existing code: 400 indicates pagination end.
-        if response.status_code == 400:
-            print(f"Pagination ended with 400 at page {page}")
-            break
-
-        response.raise_for_status()
-        payload = response.json()
-
-        if payload.get("code") != 200 or "data" not in payload:
-            print(f"API returned unexpected payload at page {page}: {payload}")
-            break
-
-        page_orders = payload["data"].get("orders", [])
-        if not page_orders:
-            print(f"No orders found on page {page}, stopping")
-            break
-
-        all_orders.extend(page_orders)
-        print(f"Fetched {len(page_orders)} orders on page {page}")
-
-        next_url = payload["data"].get("nextUrl")
-        if not next_url:
-            print(f"No nextUrl found at page {page}, stopping")
-            break
-
-        if next_url.startswith("/"):
-            url = f"{base_url}{next_url}"
-        elif next_url.startswith("http"):
-            url = next_url
-        else:
-            url = f"{base_url}/{next_url.lstrip('/')}"
-
-        # nextUrl already includes query params.
-        params = {}
-        page += 1
-
-    return all_orders
+def create_s3_client(region_name: str):
+    """Create S3 client."""
+    return boto3.client("s3", region_name=region_name)
 
 
 def create_dynamodb_client(region_name: str):
@@ -146,8 +85,147 @@ def create_dynamodb_client(region_name: str):
     return boto3.client("dynamodb", region_name=region_name)
 
 
+def _repair_json(text: str) -> List[Dict]:
+    """Repair corrupted or truncated JSON. Returns list of parsed objects."""
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, dict):
+            return [parsed]
+        return []
+    except json.JSONDecodeError as e:
+        logger.warning(f"JSON decode failed at position {e.pos}: {e.msg}. Attempting recovery...")
+
+    for end_char in [']', '}']:
+        last_pos = text.rfind(end_char)
+        if last_pos > 0:
+            try:
+                truncated = text[:last_pos + 1]
+                parsed = json.loads(truncated)
+                if isinstance(parsed, list):
+                    logger.info(f"Recovered JSON by truncating to last '{end_char}'")
+                    return parsed
+                if isinstance(parsed, dict):
+                    return [parsed]
+            except json.JSONDecodeError:
+                pass
+
+    try:
+        pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}|\[[^\[\]]*(?:\[[^\[\]]*\][^\[\]]*)*\]'
+        matches = re.findall(pattern, text)
+        if matches:
+            results = []
+            for match in matches:
+                try:
+                    obj = json.loads(match)
+                    if isinstance(obj, list):
+                        results.extend(obj)
+                    else:
+                        results.append(obj)
+                except json.JSONDecodeError:
+                    pass
+            if results:
+                logger.info(f"Recovered {len(results)} JSON objects via regex extraction")
+                return results
+    except Exception as e:
+        logger.warning(f"Regex recovery failed: {e}")
+
+    logger.error("Could not recover JSON data")
+    return []
+
+
+def _decode_with_fallback(raw_bytes: bytes) -> str:
+    """Decode bytes with encoding fallback strategy."""
+    encodings = ["utf-8", "latin-1"]
+
+    for encoding in encodings:
+        try:
+            return raw_bytes.decode(encoding)
+        except (UnicodeDecodeError, AttributeError):
+            continue
+
+    try:
+        return raw_bytes.decode("utf-8", errors="replace")
+    except Exception as e:
+        logger.error(f"All decoding attempts failed: {e}")
+        return ""
+
+
+def read_orders_from_s3_file(
+    s3_client,
+    bucket: str,
+    key: str,
+) -> List[Dict]:
+    """Read and parse orders from S3 JSON file with corruption recovery."""
+    try:
+        response = s3_client.get_object(Bucket=bucket, Key=key)
+        raw_bytes = response["Body"].read()
+
+        text = _decode_with_fallback(raw_bytes)
+        if not text:
+            return []
+
+        orders = _repair_json(text)
+        return orders if isinstance(orders, list) else []
+
+    except s3_client.exceptions.NoSuchKey:
+        logger.debug(f"File not found: {bucket}/{key}")
+        return []
+    except Exception as e:
+        logger.error(f"Error reading S3 file {bucket}/{key}: {e}")
+        return []
+
+
+def list_s3_files_for_date_range(
+    s3_client,
+    bucket: str,
+    start_date: date,
+    end_date: date,
+    prefix: str = DEFAULT_PREFIX,
+) -> List[str]:
+    """List all S3 JSON files matching orders/YYYY-MM/YYYY-MM-DD.json pattern within date range."""
+    files = []
+    current_date = start_date
+
+    while current_date <= end_date:
+        year_month = current_date.strftime("%Y-%m")
+        day_file = current_date.strftime("%Y-%m-%d")
+        s3_key = f"{prefix}/{year_month}/{day_file}.json"
+        files.append(s3_key)
+        current_date += timedelta(days=1)
+
+    return files
+
+
+def fetch_orders_from_s3(
+    s3_client,
+    bucket: str,
+    start_date: date,
+    end_date: date,
+    prefix: str = DEFAULT_PREFIX,
+) -> List[Dict]:
+    """Fetch all orders from S3 within date range."""
+    all_orders: List[Dict] = []
+    s3_keys = list_s3_files_for_date_range(s3_client, bucket, start_date, end_date, prefix=prefix)
+
+    for s3_key in s3_keys:
+        logger.info(f"Fetching from S3: {bucket}/{s3_key}")
+        orders = read_orders_from_s3_file(s3_client, bucket, s3_key)
+
+        if orders:
+            all_orders.extend(orders)
+            logger.info(f"Loaded {len(orders)} orders from {s3_key}")
+        else:
+            logger.debug(f"No orders found in {s3_key}")
+
+    return all_orders
+
+
 def _normalize_for_dynamodb(value):
     """Convert Python values into DynamoDB-safe native values."""
+    if isinstance(value, str):
+        return value
     if isinstance(value, float):
         return Decimal(str(value))
     if isinstance(value, int):
@@ -164,112 +242,103 @@ def _normalize_for_dynamodb(value):
 
 
 def _serialize_item_for_client(item: Dict, serializer: TypeSerializer) -> Dict:
-    """Serialize plain dict item into DynamoDB AttributeValue map."""
     normalized_item = {k: _normalize_for_dynamodb(v) for k, v in item.items()}
     return {k: serializer.serialize(v) for k, v in normalized_item.items()}
 
 
-def _first_suborder(order: Dict) -> Dict:
-    suborders = order.get("suborders")
-    if isinstance(suborders, list) and suborders and isinstance(suborders[0], dict):
-        return suborders[0]
-    return {}
-
-
-def _pick_first_non_empty(*values):
-    for value in values:
-        if value not in (None, "", [], {}):
-            return value
-    return None
-
-
-def _project_order_for_dynamodb(
+def _project_suborder_for_dynamodb(
     order: Dict,
+    suborder: Dict,
     source_tag: str,
     source_month: str,
     primary_key: str,
+    suborder_index: int = 1,
 ) -> Dict:
-    first_sub = _first_suborder(order)
+    """Project a single suborder as a complete DynamoDB row with unique invoice_id."""
+    original_invoice_id = order.get(primary_key)
+
+    if suborder_index > 1:
+        unique_invoice_id = f"{original_invoice_id}_{suborder_index}"
+    else:
+        unique_invoice_id = str(original_invoice_id)
 
     projected = {
-        primary_key: order.get(primary_key),
+        primary_key: unique_invoice_id,
         "source_file": source_tag,
         "source_month": source_month,
         "order_id": order.get("order_id"),
         "order_date": order.get("order_date"),
         "total_amount": order.get("total_amount"),
-        "item_quantity": _pick_first_non_empty(
-            order.get("item_quantity"),
-            first_sub.get("item_quantity"),
-        ),
-        "suborder_quantity": _pick_first_non_empty(
-            order.get("suborder_quantity"),
-            first_sub.get("suborder_quantity"),
-        ),
+        "item_quantity": suborder.get("item_quantity"),
+        "suborder_model_no": suborder.get("model_no"),
+        "suborder_quantity": suborder.get("suborder_quantity"),
         "order_quantity": order.get("order_quantity"),
-        "sku": _pick_first_non_empty(
-            order.get("sku"),
-            first_sub.get("sku"),
-        ),
-        "suborder_model_no": _pick_first_non_empty(
-            first_sub.get("model_no"),
-        ),
-        "suborder_sku": _pick_first_non_empty(
-            order.get("suborder_sku"),
-            first_sub.get("sku"),
-        ),
-        "suborder_marketplace_sku": _pick_first_non_empty(
-            first_sub.get("marketplace_sku"),
-        ),
-        "marketplace_sku": _pick_first_non_empty(
-            order.get("marketplace_sku"),
-            first_sub.get("marketplace_sku"),
-        ),
+        "sku": suborder.get("sku"),
+        "suborder_sku": suborder.get("sku"),
+        "suborder_marketplace_sku": suborder.get("marketplace_sku"),
+        "marketplace_sku": suborder.get("marketplace_sku"),
         "order_status": order.get("order_status"),
         "payment_mode": order.get("payment_mode"),
         "order_type": order.get("order_type"),
         "marketplace": order.get("marketplace"),
         "courier": order.get("courier"),
         "import_warehouse_name": order.get("import_warehouse_name"),
+        "billing_state": order.get("billing_state"),
         "state": order.get("state"),
         "city": order.get("city"),
         "pin_code": order.get("pin_code"),
-        "size": _pick_first_non_empty(
-            order.get("size"),
-            first_sub.get("size"),
-        ),
-        "suborder_size": _pick_first_non_empty(
-            order.get("suborder_size"),
-            first_sub.get("size"),
-        ),
-        "suborder_selling_price": _pick_first_non_empty(
-            order.get("suborder_selling_price"),
-            first_sub.get("selling_price")
-        ),
-        "suborder_cost": _pick_first_non_empty(
-            order.get("suborder_cost"),
-            first_sub.get("cost"),
-        ),
-        "suborder_mrp": _pick_first_non_empty(
-            order.get("suborder_mrp"),
-            first_sub.get("mrp"),
-        ),
-        "suborder_productName": _pick_first_non_empty(
-            order.get("suborder_productName"),
-            first_sub.get("productName"),
-        ),
+        "size": suborder.get("size"),
+        "suborder_size": suborder.get("size"),
+        "suborder_selling_price": suborder.get("selling_price"),
+        "suborder_cost": suborder.get("cost"),
+        "suborder_mrp": suborder.get("mrp"),
+        "suborder_productName": suborder.get("productName"),
     }
 
-    projected["canonical_sku"] = _pick_first_non_empty(
-        order.get("canonical_sku"),
-        projected.get("sku"),
-        projected.get("suborder_sku"),
-        projected.get("suborder_marketplace_sku"),
-        projected.get("marketplace_sku"),
-    )
+    projected["canonical_sku"] = suborder.get("sku") or order.get("canonical_sku")
 
     allowed = set(REQUIRED_COLUMNS + [primary_key, "source_file", "source_month"])
     return {k: v for k, v in projected.items() if k in allowed and v is not None}
+
+
+def _extract_rows_from_suborders(
+    order: Dict,
+    source_tag: str,
+    source_month: str,
+    primary_key: str,
+) -> List[Dict]:
+    """Extract one row per suborder. If no suborders, use order data with index 1."""
+    rows = []
+    suborders = order.get("suborders", [])
+
+    if not isinstance(suborders, list):
+        suborders = []
+
+    if not suborders:
+        row = _project_suborder_for_dynamodb(
+            order=order,
+            suborder=order,
+            source_tag=source_tag,
+            source_month=source_month,
+            primary_key=primary_key,
+            suborder_index=1,
+        )
+        if row and primary_key in row:
+            rows.append(row)
+    else:
+        for idx, suborder in enumerate(suborders, start=1):
+            row = _project_suborder_for_dynamodb(
+                order=order,
+                suborder=suborder,
+                source_tag=source_tag,
+                source_month=source_month,
+                primary_key=primary_key,
+                suborder_index=idx,
+            )
+            if row and primary_key in row:
+                rows.append(row)
+
+    return rows
 
 
 def prepare_rows_for_dynamodb(
@@ -278,10 +347,10 @@ def prepare_rows_for_dynamodb(
     source_month: str,
     primary_key: str = PRIMARY_KEY_FIELD,
 ) -> List[Dict]:
-    """Prepare projected rows and add lineage metadata for DynamoDB upserts."""
+    """Prepare one row per suborder for DynamoDB upsert, preserving order relationships."""
     prepared_rows: List[Dict] = []
 
-    for idx, order in enumerate(orders):
+    for order in orders:
         if not isinstance(order, dict):
             continue
 
@@ -289,13 +358,13 @@ def prepare_rows_for_dynamodb(
         if original_key in (None, ""):
             continue
 
-        row = _project_order_for_dynamodb(
+        rows = _extract_rows_from_suborders(
             order=order,
             source_tag=source_tag,
             source_month=source_month,
             primary_key=primary_key,
         )
-        prepared_rows.append(row)
+        prepared_rows.extend(rows)
 
     return prepared_rows
 
@@ -341,47 +410,51 @@ def upsert_orders_into_dynamodb(
 def run_extraction(
     start_day: date,
     end_day: date,
-    base_url: str,
+    s3_bucket: str,
+    prefix: str,
     table_name: str,
     aws_region: str,
 ) -> None:
-    """Extract orders day-by-day and upsert each day directly to DynamoDB."""
-    api_key = os.getenv("EASYECOM_API_KEY")
-    jwt_token = os.getenv("EASYECOM_JWT_TOKEN")
-
-    if not api_key or not jwt_token:
-        raise ValueError("EASYECOM_API_KEY and EASYECOM_JWT_TOKEN must be set in environment")
-
+    """Extract orders from S3 and upsert to DynamoDB."""
     if start_day > end_day:
         raise ValueError("start_date must be less than or equal to end_date")
 
+    s3_client = create_s3_client(region_name=aws_region)
     dynamodb_client = create_dynamodb_client(region_name=aws_region)
+
+    logger.info(f"Starting S3 extraction from {start_day} to {end_day}")
+    logger.info(f"S3 bucket: {s3_bucket}, DynamoDB table: {table_name}, Region: {aws_region}")
 
     current_day = start_day
     total_orders = 0
     total_upserted = 0
 
-    logger.info(f"Starting extraction from {start_day} to {end_day} in table '{table_name}' ({aws_region})")
-
     while current_day <= end_day:
-        day_start = datetime.combine(current_day, datetime.min.time()).strftime(DATETIME_FMT)
-        day_end = datetime.combine(current_day, datetime.max.time().replace(microsecond=0)).strftime(DATETIME_FMT)
+        logger.info(f"Processing date: {current_day}")
 
-        logger.info(f"Processing date: {current_day} (time range: {day_start} to {day_end})")
-        daily_orders = fetch_orders_for_window(
-            start_date=day_start,
-            end_date=day_end,
-            api_key=api_key,
-            jwt_token=jwt_token,
-            base_url=base_url,
+        daily_orders = fetch_orders_from_s3(
+            s3_client=s3_client,
+            bucket=s3_bucket,
+            start_date=current_day,
+            end_date=current_day,
+            prefix=prefix,
         )
 
-        source_tag = f"supabase_only/{current_day.strftime(DATE_FMT)}.json"
+        if not daily_orders:
+            logger.warning(f"No orders found for {current_day}")
+            current_day += timedelta(days=1)
+            continue
+
+        source_month = current_day.strftime("%Y-%m")
+        source_tag = f"s3://{s3_bucket}/{prefix}/{source_month}"
+
         rows_for_dynamodb = prepare_rows_for_dynamodb(
             orders=daily_orders,
             source_tag=source_tag,
-            source_month=current_day.strftime("%Y-%m"),
+            source_month=source_month,
         )
+
+        logger.info(f"Prepared {len(rows_for_dynamodb)} rows for DynamoDB upsert on {current_day}")
 
         upserted_count = upsert_orders_into_dynamodb(
             dynamodb_client=dynamodb_client,
@@ -389,26 +462,32 @@ def run_extraction(
             rows=rows_for_dynamodb,
         )
 
-        day_count = len(daily_orders)
-        total_orders += day_count
-        total_upserted += upserted_count
+        logger.info(
+            f"✓ Completed {current_day}: fetched {len(daily_orders)} orders | upserted {upserted_count} rows"
+        )
 
-        logger.info(f"✓ Completed {current_day}: fetched {day_count} orders, upserted {upserted_count} rows")
+        total_orders += len(daily_orders)
+        total_upserted += upserted_count
         current_day += timedelta(days=1)
 
-    logger.info(f"Extraction complete. Total orders fetched: {total_orders}, Total rows upserted: {total_upserted}")
+    logger.info(f"Extraction complete. Total orders: {total_orders}, Upserted rows: {total_upserted}")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Extract daily EasyEcom orders and upsert directly to DynamoDB"
+        description="Extract orders from S3 bucket and upsert to DynamoDB"
     )
     parser.add_argument("--start-date", required=True, help="Start date in YYYY-MM-DD")
     parser.add_argument("--end-date", required=True, help="End date in YYYY-MM-DD")
     parser.add_argument(
-        "--base-url",
-        default=os.getenv("EASYECOM_BASE_URL", DEFAULT_BASE_URL),
-        help="EasyEcom API base URL",
+        "--s3-bucket",
+        default=os.getenv("S3_BUCKET", DEFAULT_BUCKET),
+        help=f"S3 bucket name (default: {DEFAULT_BUCKET})",
+    )
+    parser.add_argument(
+        "--prefix",
+        default=os.getenv("S3_PREFIX", DEFAULT_PREFIX),
+        help=f"S3 prefix (default: {DEFAULT_PREFIX})",
     )
     parser.add_argument(
         "--ddb-table",
@@ -433,7 +512,8 @@ def main() -> None:
     run_extraction(
         start_day=start_day,
         end_day=end_day,
-        base_url=args.base_url,
+        s3_bucket=args.s3_bucket,
+        prefix=args.prefix,
         table_name=args.ddb_table,
         aws_region=args.aws_region,
     )

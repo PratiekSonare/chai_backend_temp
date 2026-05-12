@@ -295,6 +295,10 @@ def compute_sku_metrics(df: pd.DataFrame) -> dict:
     daily["mrp_discount_pct"] = ((daily["total_mrp"] - daily["revenue"]) / daily["total_mrp"] * 100).round(2)
     daily_series = daily.drop(columns=["total_mrp"]).round(2).to_dict(orient="records")
 
+    # ── Product attributes ────────────────────────────────────────────────────
+    model_numbers = df["suborder_model_no"].dropna().unique().tolist()
+    product_names = df["suborder_productName"].dropna().unique().tolist()
+
     return {
         "cumulative": {
             "total_revenue":          round(total_revenue, 2),
@@ -308,6 +312,8 @@ def compute_sku_metrics(df: pd.DataFrame) -> dict:
             "order_status_breakdown": status_counts,
             "payment_split":          payment_split,
         },
+        "suborder_model_no":           model_numbers,
+        "suborder_productName":        product_names,
         "by_marketplace":              marketplace_metrics,
         "price_history_by_marketplace": price_history_by_marketplace,
         "by_state":                    state_metrics,
@@ -328,9 +334,10 @@ def compute_rolling(daily_series: list[dict]) -> dict:
     df = pd.DataFrame(daily_series).sort_values("order_date")
     result = {}
 
+    # 7-day and 30-day rolling windows
     for window in [7, 30]:
         tail = df.tail(window)
-        rev  = tail["revenue"].sum()
+        rev = tail["revenue"].sum()
         result[f"{window}d"] = {
             "revenue":          round(rev, 2),
             "units_sold":       round(tail["units_sold"].sum(), 2),
@@ -339,6 +346,19 @@ def compute_rolling(daily_series: list[dict]) -> dict:
                 tail["gross_profit"].sum() / rev * 100, 2
             ) if rev else 0,
         }
+
+    # All-time aggregates (sum across entire daily_series)
+    rev_total = df["revenue"].sum()
+    units_total = df["units_sold"].sum()
+    orders_total = int(df["orders"].sum())
+    gp_total = df["gross_profit"].sum()
+
+    result["all_time"] = {
+        "revenue":          round(rev_total, 2),
+        "units_sold":       round(units_total, 2),
+        "orders":           orders_total,
+        "gross_margin_pct": round(gp_total / rev_total * 100, 2) if rev_total else 0,
+    }
 
     return result
 
