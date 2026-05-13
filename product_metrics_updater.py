@@ -208,13 +208,29 @@ def compute_sku_metrics(df: pd.DataFrame) -> dict:
     )
 
     # ── Marketplace metrics (key client requirement — tracks price/margin drift) ──
+    # Calculate overall means excluding B2B for use in B2B metrics
+    df_non_b2b = df[df["marketplace"].str.upper() != "B2B"]
+    overall_avg_sp = df_non_b2b["suborder_selling_price"].mean()
+    overall_avg_cost = df_non_b2b["suborder_cost"].mean()
+    overall_avg_mrp = df_non_b2b["suborder_mrp"].mean()
+
     marketplace_metrics = {}
     for mp, grp in df.groupby("marketplace"):
-        mp_rev     = grp["revenue"].sum()
-        mp_gp      = grp["gross_profit"].sum()
         mp_units   = grp["suborder_quantity"].sum()
-        avg_sp     = grp["suborder_selling_price"].mean()
-        avg_mrp    = grp["suborder_mrp"].mean()
+        
+        # Use overall (non-B2B) means for B2B marketplace, otherwise use marketplace-specific means
+        is_b2b = mp.upper() == "B2B"
+        avg_sp = overall_avg_sp if is_b2b else grp["suborder_selling_price"].mean()
+        avg_cost = overall_avg_cost if is_b2b else grp["suborder_cost"].mean()
+        avg_mrp = overall_avg_mrp if is_b2b else grp["suborder_mrp"].mean()
+        
+        # For B2B, recalculate revenue using overall (non-B2B) average selling price
+        if is_b2b:
+            mp_rev = overall_avg_sp * mp_units
+            mp_gp = (overall_avg_sp - overall_avg_cost) * mp_units
+        else:
+            mp_rev = grp["revenue"].sum()
+            mp_gp = grp["gross_profit"].sum()
 
         marketplace_metrics[mp] = {
             "revenue":            round(mp_rev, 2),
@@ -222,7 +238,7 @@ def compute_sku_metrics(df: pd.DataFrame) -> dict:
             "order_count":        int(grp["order_id"].nunique()),
             "avg_selling_price":  round(avg_sp, 2),
             "avg_mrp":            round(avg_mrp, 2),
-            "avg_cost":           round(grp["suborder_cost"].mean(), 2),
+            "avg_cost":           round(avg_cost, 2),
             "gross_margin_pct":   round(mp_gp / mp_rev * 100, 2) if mp_rev else 0,
             "mrp_discount_pct":   round((avg_mrp - avg_sp) / avg_mrp * 100, 2) if avg_mrp else 0,
             "revenue_share_pct":  round(mp_rev / total_revenue * 100, 2) if total_revenue else 0,
