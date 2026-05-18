@@ -5,9 +5,11 @@ import argparse
 import csv
 import json
 import sys
-from typing import Any, Dict, List
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 import boto3
+from boto3.dynamodb.conditions import Attr
 
 
 def deserialize_dynamodb_item(item: Dict[str, Any]) -> Dict[str, Any]:
@@ -46,14 +48,28 @@ def export_table_to_csv(
     table_name: str,
     output_file: str,
     region: str = "ap-south-1",
-    limit: int = None
+    limit: int = None,
+    since_date: Optional[str] = None,
+    date_field: str = "createdAt"
 ) -> int:
-    """Scan DynamoDB table and export to CSV."""
+    """Scan DynamoDB table and export to CSV.
+    
+    Args:
+        table_name: DynamoDB table name
+        output_file: Output CSV file path
+        region: AWS region
+        limit: Scan limit per request
+        since_date: ISO format date (YYYY-MM-DD) to filter results. 
+                   Filters on DynamoDB side using FilterExpression.
+        date_field: Field name to filter on (default: createdAt)
+    """
     dynamodb = boto3.client('dynamodb', region_name=region)
     
     print(f"Scanning DynamoDB table: {table_name}")
     print(f"Region: {region}")
     print(f"Output file: {output_file}")
+    if since_date:
+        print(f"Filter: {date_field} >= {since_date}")
     
     all_items = []
     last_evaluated_key = None
@@ -65,6 +81,13 @@ def export_table_to_csv(
                 'TableName': table_name,
                 'Limit': limit or 100
             }
+            
+            # Add FilterExpression for date filtering on DynamoDB side
+            if since_date:
+                kwargs['FilterExpression'] = f"{date_field} >= :since_date"
+                kwargs['ExpressionAttributeValues'] = {
+                    ':since_date': {'S': since_date}
+                }
             
             if last_evaluated_key:
                 kwargs['ExclusiveStartKey'] = last_evaluated_key
@@ -124,6 +147,8 @@ def main():
     parser.add_argument('--region', default='ap-south-1', help="AWS region (default: ap-south-1)")
     parser.add_argument('--output', help="Output CSV file (default: {table}_export.csv)")
     parser.add_argument('--limit', type=int, help="Scan limit per request (default: 100)")
+    parser.add_argument('--since_date', help="ISO format date (YYYY-MM-DD) to fetch only records from this date onwards")
+    parser.add_argument('--date_field', default='createdAt', help="Date field to filter on (default: createdAt)")
     
     args = parser.parse_args()
     
@@ -133,7 +158,9 @@ def main():
         table_name=args.table,
         output_file=output_file,
         region=args.region,
-        limit=args.limit
+        limit=args.limit,
+        since_date=args.since_date,
+        date_field=args.date_field
     )
     
     sys.exit(0 if count > 0 else 1)

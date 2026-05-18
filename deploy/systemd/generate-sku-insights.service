@@ -1,0 +1,15 @@
+[Unit]
+Description=Generate SKU insights and trend analysis for homepage display
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/chupps/backend
+ExecStart=/home/ubuntu/chupps/backend/run_generate_sku_insights.sh
+StandardOutput=append:/var/log/generate-sku-insights.log
+StandardError=append:/var/log/generate-sku-insights.log
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Generate SKU insights daily
+
+[Timer]
+# Runs at 00:15:00 UTC, right after SKU metrics generation (00:10:30)
+OnCalendar=*-*-* 00:15:00
+Persistent=true
+Unit=generate-sku-insights.service
+
+[Install]
+WantedBy=timers.target

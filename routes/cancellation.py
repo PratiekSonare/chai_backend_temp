@@ -406,6 +406,8 @@ def rto_dashboard(request: DateRangeOrdersRequest):
         if pending_returns:
             pending_df = pd.DataFrame(pending_returns)
             pending_metrics = _calculate_metrics_from_df(pending_df, "pending_returns")
+            max_rows = 5000
+            pending_metrics['orders'] = pending_returns[:max_rows]
         else:
             pending_metrics = _calculate_metrics_from_df(pd.DataFrame(), "pending_returns")
         

@@ -173,6 +173,10 @@ def to_float(val) -> float:
 def compute_sku_metrics(df: pd.DataFrame) -> dict:
     """Compute all metrics for a single canonical SKU's dataframe."""
     df = df.copy()
+    
+    if df.empty:
+        # No valid data to process
+        return {}
 
     # Cast numeric columns
     for col in ["suborder_selling_price", "suborder_cost", "suborder_mrp", "suborder_quantity"]:
@@ -208,29 +212,15 @@ def compute_sku_metrics(df: pd.DataFrame) -> dict:
     )
 
     # ── Marketplace metrics (key client requirement — tracks price/margin drift) ──
-    # Calculate overall means excluding B2B for use in B2B metrics
-    df_non_b2b = df[df["marketplace"].str.upper() != "B2B"]
-    overall_avg_sp = df_non_b2b["suborder_selling_price"].mean()
-    overall_avg_cost = df_non_b2b["suborder_cost"].mean()
-    overall_avg_mrp = df_non_b2b["suborder_mrp"].mean()
-
+    # B2B is excluded entirely
     marketplace_metrics = {}
     for mp, grp in df.groupby("marketplace"):
         mp_units   = grp["suborder_quantity"].sum()
-        
-        # Use overall (non-B2B) means for B2B marketplace, otherwise use marketplace-specific means
-        is_b2b = mp.upper() == "B2B"
-        avg_sp = overall_avg_sp if is_b2b else grp["suborder_selling_price"].mean()
-        avg_cost = overall_avg_cost if is_b2b else grp["suborder_cost"].mean()
-        avg_mrp = overall_avg_mrp if is_b2b else grp["suborder_mrp"].mean()
-        
-        # For B2B, recalculate revenue using overall (non-B2B) average selling price
-        if is_b2b:
-            mp_rev = overall_avg_sp * mp_units
-            mp_gp = (overall_avg_sp - overall_avg_cost) * mp_units
-        else:
-            mp_rev = grp["revenue"].sum()
-            mp_gp = grp["gross_profit"].sum()
+        avg_sp = grp["suborder_selling_price"].mean()
+        avg_cost = grp["suborder_cost"].mean()
+        avg_mrp = grp["suborder_mrp"].mean()
+        mp_rev = grp["revenue"].sum()
+        mp_gp = grp["gross_profit"].sum()
 
         marketplace_metrics[mp] = {
             "revenue":            round(mp_rev, 2),
@@ -476,6 +466,14 @@ def main():
 
     # 2. Build DataFrame and parse canonical SKU + size from the 'sku' field
     df = pd.DataFrame(raw_items)
+    # Exclude B2B + STN (Stock Notation) orders entirely at source
+    df = df[~((df["order_type"].str.upper() == "STN"))]
+    
+    if df.empty:
+        log.info("No valid orders after filtering B2B+STN. Updating last_run and exiting.")
+        save_last_run(today)
+        return
+    
     parsed          = df["sku"].apply(lambda x: pd.Series(parse_sku(str(x)), index=["canonical_sku", "size"]))
     df["canonical_sku"] = parsed["canonical_sku"]
     df["size"]          = parsed["size"]
