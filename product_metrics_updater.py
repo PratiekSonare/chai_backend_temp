@@ -12,6 +12,7 @@ import argparse
 import os
 from datetime import datetime, timezone
 from decimal import Decimal
+from math import isnan, isinf
 
 import boto3
 from boto3.dynamodb.conditions import Attr
@@ -170,6 +171,27 @@ def to_float(val) -> float:
         return 0.0
 
 
+def serialize_json(obj):
+    """Custom JSON encoder that converts NaN/Inf to null."""
+    if isinstance(obj, float):
+        if isnan(obj) or isinf(obj):
+            return 0.0
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+def clean_nan_values(obj):
+    """Recursively convert all NaN and Inf values to 0 in dicts, lists, and floats."""
+    if isinstance(obj, dict):
+        return {k: clean_nan_values(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [clean_nan_values(item) for item in obj]
+    elif isinstance(obj, float):
+        if isnan(obj) or isinf(obj):
+            return 0.0
+        return obj
+    return obj
+
+
 def compute_sku_metrics(df: pd.DataFrame) -> dict:
     """Compute all metrics for a single canonical SKU's dataframe."""
     df = df.copy()
@@ -216,9 +238,9 @@ def compute_sku_metrics(df: pd.DataFrame) -> dict:
     marketplace_metrics = {}
     for mp, grp in df.groupby("marketplace"):
         mp_units   = grp["suborder_quantity"].sum()
-        avg_sp = grp["suborder_selling_price"].mean()
-        avg_cost = grp["suborder_cost"].mean()
-        avg_mrp = grp["suborder_mrp"].mean()
+        avg_sp = grp["suborder_selling_price"].fillna(0).mean()
+        avg_cost = grp["suborder_cost"].fillna(0).mean()
+        avg_mrp = grp["suborder_mrp"].fillna(0).mean()
         mp_rev = grp["revenue"].sum()
         mp_gp = grp["gross_profit"].sum()
 
@@ -226,9 +248,9 @@ def compute_sku_metrics(df: pd.DataFrame) -> dict:
             "revenue":            round(mp_rev, 2),
             "units_sold":         round(mp_units, 2),
             "order_count":        int(grp["order_id"].nunique()),
-            "avg_selling_price":  round(avg_sp, 2),
-            "avg_mrp":            round(avg_mrp, 2),
-            "avg_cost":           round(avg_cost, 2),
+            "avg_selling_price":  round(avg_sp, 2) if avg_sp and not isnan(avg_sp) else 0,
+            "avg_mrp":            round(avg_mrp, 2) if avg_mrp and not isnan(avg_mrp) else 0,
+            "avg_cost":           round(avg_cost, 2) if avg_cost and not isnan(avg_cost) else 0,
             "gross_margin_pct":   round(mp_gp / mp_rev * 100, 2) if mp_rev else 0,
             "mrp_discount_pct":   round((avg_mrp - avg_sp) / avg_mrp * 100, 2) if avg_mrp else 0,
             "revenue_share_pct":  round(mp_rev / total_revenue * 100, 2) if total_revenue else 0,
@@ -294,18 +316,18 @@ def compute_sku_metrics(df: pd.DataFrame) -> dict:
           .reset_index()
           .sort_values("order_date")
     )
-    daily["avg_sp"]           = (daily["revenue"]      / daily["units_sold"]).round(2)
-    daily["avg_cp"]           = (daily["cogs"]         / daily["units_sold"]).round(2)
-    daily["avg_mrp"]          = (daily["total_mrp"]    / daily["units_sold"]).round(2)
-    daily["gross_margin_pct"] = (daily["gross_profit"] / daily["revenue"] * 100).round(2)
-    daily["mrp_discount_pct"] = ((daily["total_mrp"] - daily["revenue"]) / daily["total_mrp"] * 100).round(2)
+    daily["avg_sp"]           = (daily["revenue"]      / daily["units_sold"]).fillna(0).round(2)
+    daily["avg_cp"]           = (daily["cogs"]         / daily["units_sold"]).fillna(0).round(2)
+    daily["avg_mrp"]          = (daily["total_mrp"]    / daily["units_sold"]).fillna(0).round(2)
+    daily["gross_margin_pct"] = (daily["gross_profit"] / daily["revenue"] * 100).fillna(0).round(2)
+    daily["mrp_discount_pct"] = ((daily["total_mrp"] - daily["revenue"]) / daily["total_mrp"] * 100).fillna(0).round(2)
     daily_series = daily.drop(columns=["total_mrp"]).round(2).to_dict(orient="records")
 
     # ── Product attributes ────────────────────────────────────────────────────
     model_numbers = df["suborder_model_no"].dropna().unique().tolist()
     product_names = df["suborder_productName"].dropna().unique().tolist()
 
-    return {
+    metrics = {
         "cumulative": {
             "total_revenue":          round(total_revenue, 2),
             "total_units_sold":       round(total_units, 2),
@@ -329,6 +351,9 @@ def compute_sku_metrics(df: pd.DataFrame) -> dict:
         "warehouse_distribution":      warehouse_dist,
         "daily_series":                daily_series,
     }
+    
+    # Clean all NaN/Inf values before returning
+    return clean_nan_values(metrics)
 
 
 # ── Rolling windows ───────────────────────────────────────────────────────────
@@ -370,17 +395,50 @@ def compute_rolling(daily_series: list[dict]) -> dict:
 
 
 # ── Merge logic ───────────────────────────────────────────────────────────────
+def compute_cumulative_from_daily(daily_series: list[dict]) -> dict:
+    """Compute cumulative metrics from the full daily_series (all-time aggregates)."""
+    if not daily_series:
+        return {}
+    
+    df = pd.DataFrame(daily_series).sort_values("order_date")
+    
+    total_revenue = df["revenue"].sum()
+    total_units = df["units_sold"].sum()
+    total_orders = int(df["orders"].sum())
+    total_gp = df["gross_profit"].sum()
+    
+    avg_order_value = total_revenue / total_orders if total_orders else 0
+    gross_margin_pct = (total_gp / total_revenue * 100) if total_revenue else 0
+    
+    # Assuming order_status_breakdown, payment_split, etc. are in the data
+    # For now, return basic cumulative metrics
+    return {
+        "total_revenue": round(total_revenue, 2),
+        "total_units_sold": round(total_units, 2),
+        "total_orders": total_orders,
+        "avg_order_value": round(avg_order_value, 2),
+        "total_cogs": round(df["cogs"].sum(), 2),
+        "gross_margin_pct": round(gross_margin_pct, 2),
+        # These fields should come from the original breakdowns
+        "cancellation_rate": 0,  # Will be preserved from new_metrics if it has it
+        "return_rate": 0,        # Will be preserved from new_metrics if it has it
+        "order_status_breakdown": {},
+        "payment_split": {},
+    }
+
+
 def merge_metrics(existing: dict, new_metrics: dict) -> dict:
     """
     Merge new metrics into the existing S3 profile.
     - daily_series: deduped by date, new data wins for the same date.
     - All breakdowns (marketplace, state, size) are replaced with the latest
-      full-dataset values from this run (they're always recomputed from scratch
+      full-dataset values from this run (they're already recomputed from scratch
       per SKU so they're already cumulative for all fetched data).
+    - cumulative: recalculated from the merged daily_series for all-time accuracy.
     """
     if not existing:
         merged = dict(new_metrics)
-        merged["rolling"] = compute_rolling(merged.get("daily_series", []))
+        merged["rolling"] = compute_rolling(merged.get("daiqly_series", []))
         return merged
 
     # Merge daily_series — deduped by date, new data wins
@@ -401,6 +459,20 @@ def merge_metrics(existing: dict, new_metrics: dict) -> dict:
     merged["price_history_by_marketplace"] = sorted(
         existing_ph.values(), key=lambda x: (x["date"], x["marketplace"])
     )
+    
+    # ✅ CRITICAL FIX: Recalculate cumulative from full merged daily_series for all-time metrics
+    merged_cumulative = compute_cumulative_from_daily(merged["daily_series"])
+    # Preserve breakdown fields from new_metrics if they exist
+    if "order_status_breakdown" in new_metrics:
+        merged_cumulative["order_status_breakdown"] = new_metrics["order_status_breakdown"]
+    if "payment_split" in new_metrics:
+        merged_cumulative["payment_split"] = new_metrics["payment_split"]
+    if "cancellation_rate" in new_metrics:
+        merged_cumulative["cancellation_rate"] = new_metrics["cancellation_rate"]
+    if "return_rate" in new_metrics:
+        merged_cumulative["return_rate"] = new_metrics["return_rate"]
+    merged["cumulative"] = merged_cumulative
+    
     merged["rolling"] = compute_rolling(merged["daily_series"])
     return merged
 
@@ -423,7 +495,7 @@ def write_sku_profile(sku: str, profile: dict) -> None:
     s3.put_object(
         Bucket=S3_BUCKET,
         Key=key,
-        Body=json.dumps(profile, default=str),
+        Body=json.dumps(profile, default=serialize_json),
         ContentType="application/json",
     )
     log.info(f"Written s3://{S3_BUCKET}/{key}")

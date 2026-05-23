@@ -170,107 +170,159 @@ class LabelAssigner:
 
 
 class FeatureEngineer:
-    """Feature engineering with target encoding for high-cardinality features."""
-    
+    """Feature engineering for footwear orders."""
+
     def __init__(self):
-        self.category_encodings = {}  # Will store mean return rate per category
-    
-    def fit_target_encoding(self, df: pd.DataFrame, labels: np.ndarray, 
-                            categorical_cols: List[str], smoothing: float = 1.0) -> None:
-        """
-        Fit target encoding mappings for high-cardinality categorical features.
-        Uses Bayesian smoothing to handle rare categories.
-        """
+        self.category_encodings = {}
+
+    def fit_target_encoding(self, df: pd.DataFrame, labels: np.ndarray,
+                           categorical_cols: List[str], smoothing: float = 1.0) -> None:
+        """Fit target encoding for categorical features using Bayesian smoothing."""
         global_rate = labels.mean()
-        
+
         for col in categorical_cols:
             category_stats = {}
+            if col not in df.columns or df[col].isnull().all():
+                continue
+
             for category in df[col].unique():
+                if pd.isna(category):
+                    continue
                 mask = df[col] == category
                 category_labels = labels[mask]
-                
-                # Bayesian smoothing: blend category mean with global mean
+
                 n = len(category_labels)
                 category_mean = category_labels.mean() if n > 0 else global_rate
-                
                 smoothed = (n * category_mean + smoothing * global_rate) / (n + smoothing)
                 category_stats[category] = smoothed
-            
+
             self.category_encodings[col] = category_stats
-            print(f"Fit target encoding for {col}: {len(category_stats)} unique values")
-    
-    def engineer_features(self, orders: List[Dict], fit_encodings: bool = False, 
-                         labels: Optional[np.ndarray] = None) -> pd.DataFrame:
-        """
-        Transform orders into feature matrix.
-        """
+
+    def engineer_features(self, orders: List[Dict], fit_encodings: bool = False,
+                         labels: Optional[np.ndarray] = None) -> Tuple[pd.DataFrame, Optional[np.ndarray]]:
+        """Transform orders into feature matrix using actual schema (31 fields)."""
+        import re
         records = []
-        
+        extracted_labels = []
+
         for order in orders:
+            status_val = str(order.get('order_status', '')).strip().upper()
+            order_type_val = str(order.get('order_type', '')).strip().upper()
+
+            if status_val == 'RETURNED':
+                continue
+            if order_type_val == 'STN':
+                continue
+
             try:
-                # Parse date
-                order_date_str = order.get('order_date', '')
-                if isinstance(order_date_str, str):
-                    order_date = pd.to_datetime(order_date_str.split()[0])
-                else:
-                    continue
-                
-                # Extract numeric features
+                order_date_raw = order.get('order_date', '')
+                order_date_str = str(order_date_raw).strip()
+
+                date_to_parse = None
+                if order_date_str:
+                    if ' ' in order_date_str:
+                        date_to_parse = order_date_str.split()[0]
+                    else:
+                        date_to_parse = order_date_str
+
+                order_date = pd.to_datetime(date_to_parse, errors='coerce')
+                if pd.isna(order_date):
+                    order_date = datetime.now()
+
+                order_date_hour = order_date.hour if pd.notna(order_date) else 0
+
+                def clean_size(size_str):
+                    if pd.isna(size_str): return np.nan
+                    s = str(size_str).replace(',', '').strip()
+                    s = re.sub(r'[^\d.]', '', s)
+                    return pd.to_numeric(s, errors='coerce')
+
+                def parse_sku_and_extract_size(sku_str):
+                    sku_str = str(sku_str).strip().upper()
+                    if '-' in sku_str:
+                        parts = sku_str.rsplit('-', 1)
+                        if len(parts) == 2 and parts[1].replace('.', '', 1).isdigit():
+                            return parts[0], pd.to_numeric(parts[1], errors='coerce')
+                    return sku_str, np.nan
+
+                raw_sku = order.get('sku', 'UNKNOWN')
+                clean_sku_val, extracted_sku_size = parse_sku_and_extract_size(raw_sku)
+
+                raw_suborder_sku = order.get('suborder_sku', 'UNKNOWN')
+                clean_suborder_sku_val, extracted_suborder_sku_size = parse_sku_and_extract_size(raw_suborder_sku)
+
+                order_size_from_data = clean_size(order.get('size', 0))
+                final_size = extracted_sku_size if pd.notna(extracted_sku_size) else order_size_from_data
+
+                order_suborder_size_from_data = clean_size(order.get('suborder_size', 0))
+                final_suborder_size = extracted_suborder_sku_size if pd.notna(extracted_suborder_sku_size) else order_suborder_size_from_data
+
+                suborder_selling_price = float(order.get('suborder_selling_price', 0))
+                if suborder_selling_price > 0:
+                    suborder_selling_price = (int(suborder_selling_price // 100) + 1) * 99
+
                 record = {
                     'order_id': order.get('order_id'),
-                    'order_date': order_date,
-                    'total_amount': float(order.get('total_amount', 0)),
+                    'invoice_id': str(order.get('invoice_id', '')),
                     'item_quantity': int(order.get('item_quantity', 0)),
                     'suborder_quantity': int(order.get('suborder_quantity', 0)),
-                    'order_quantity': int(order.get('order_quantity', 0)),
-                    'pin_code': str(order.get('pin_code', '0')),
-                    # Categorical features
-                    'sku': str(order.get('sku', 'UNKNOWN')).upper(),
+                    'clean_sku': clean_sku_val,
+                    'clean_suborder_sku': clean_suborder_sku_val,
                     'marketplace': str(order.get('marketplace', 'UNKNOWN')).upper(),
                     'payment_mode': str(order.get('payment_mode', 'UNKNOWN')).upper(),
                     'state': str(order.get('state', 'UNKNOWN')).upper(),
-                    'order_status': str(order.get('order_status', 'UNKNOWN')).upper(),
+                    'billing_state': str(order.get('billing_state', 'UNKNOWN')).upper(),
+                    'size': final_size,
+                    'suborder_size': final_suborder_size,
+                    'suborder_selling_price': suborder_selling_price,
+                    'order_date_hour': order_date_hour
                 }
+
+                if status_val == 'CANCELLED':
+                    extracted_labels.append(1)
+                else:
+                    extracted_labels.append(0)
+
                 records.append(record)
-            except (ValueError, TypeError, KeyError):
+            except (ValueError, TypeError, KeyError) as e:
                 continue
-        
+
         df = pd.DataFrame(records)
-        
+
         if len(df) == 0:
-            print("⚠ No valid records to engineer")
-            return df
-        
-        # Temporal features
-        df['day_of_week'] = df['order_date'].dt.dayofweek  # 0=Monday, 6=Sunday
-        df['month'] = df['order_date'].dt.month
-        df['day_of_month'] = df['order_date'].dt.day
-        df['week_of_year'] = df['order_date'].dt.isocalendar().week
-        df['is_quarter_end'] = df['order_date'].dt.is_quarter_end.astype(int)
-        
-        # Interaction features
-        df['price_per_item'] = df['total_amount'] / (df['item_quantity'] + 1)
-        df['order_size_variance'] = df['item_quantity'] / (df['order_quantity'] + 1)
-        
-        # Categorical encoding: fit or apply
-        categorical_cols = ['sku', 'marketplace', 'payment_mode', 'state']
-        
-        if fit_encodings and labels is not None:
-            self.fit_target_encoding(df, labels, categorical_cols)
-        
-        # Apply target encoding
+            return df, np.array([])
+
+        for col in ['size', 'suborder_size']:
+            if col in df.columns and df[col].isnull().any():
+                df[col].fillna(df[col].median() if not df[col].empty else 0, inplace=True)
+
+        cols_to_drop_raw = [
+            'canonical_sku', 'marketplace_sku', 'order_type', 'courier', 'import_warehouse_name'
+        ]
+        cols_to_drop_raw = [col for col in cols_to_drop_raw if col in df.columns]
+        if cols_to_drop_raw:
+            df = df.drop(columns=cols_to_drop_raw)
+
+        categorical_cols = ['marketplace', 'payment_mode', 'state', 'clean_sku', 'clean_suborder_sku', 'billing_state']
+        categorical_cols = [col for col in categorical_cols if col in df.columns]
+
+        current_labels = np.array(extracted_labels) if extracted_labels else np.array([])
+
+        if fit_encodings and current_labels.size > 0:
+            self.fit_target_encoding(df, current_labels, categorical_cols)
+
         for col in categorical_cols:
             if col in self.category_encodings:
                 df[f'{col}_encoded'] = df[col].map(self.category_encodings[col])
-                # Fill unknown categories with global mean
-                df[f'{col}_encoded'].fillna(labels.mean() if labels is not None else 0.5, 
-                                            inplace=True)
+                df[f'{col}_encoded'].fillna(current_labels.mean() if current_labels.size > 0 else 0.5, inplace=True)
             else:
-                # First time seeing this column, use global mean
-                df[f'{col}_encoded'] = labels.mean() if labels is not None else 0.5
-        
-        print(f"Engineered {len(df)} records with {len(df.columns)} features")
-        return df
+                pass
+
+        cols_to_drop_after_encoding = [col for col in categorical_cols if f'{col}_encoded' in df.columns and col in df.columns]
+        if cols_to_drop_after_encoding:
+            df = df.drop(columns=cols_to_drop_after_encoding)
+
+        return df, current_labels
 
 
 class ModelTrainer:

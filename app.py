@@ -1,3 +1,12 @@
+"""
+Metrics Service - Dedicated FastAPI instance for metric and chart calculations
+Handles: /orders/*, /revenue/*, /payment/*, /cancellation/*, /geography/*, /history/* endpoints
+Runs on: METRICS_PORT (default 5002)
+
+This service is optimized for data aggregation, metric calculations,
+and chart generation without the complexity of the query workflow engine.
+"""
+
 import os
 import uuid
 import numpy as np
@@ -57,44 +66,45 @@ def custom_json_encoder(obj):
 
 # Import route modules
 from routes.health import router as health_router
-from routes.query import router as query_router
 from routes.orders import router as orders_router
 from routes.revenue import router as revenue_router
 from routes.payment import router as payment_router
 from routes.cancellation import router as cancellation_router
 from routes.geography import router as geography_router
 from routes.historyOrders import router as history_orders_router
-# from routes.reasoning import router as reasoning_router
+from routes.prediction import router as prediction_router
 
 
 app = FastAPI(
-    title="Order Analysis Workflow API",
-    description="FastAPI server for processing order analysis queries",
+    title="Metrics Service - Metric & Chart Calculations",
+    description="FastAPI server for orders metrics, revenue analysis, and chart generation",
     version="1.0.0"
 )
 
 async def startup_event():
     """Print startup banner once when the application starts."""
     host = os.getenv('HOST', '0.0.0.0')
-    port = int(os.getenv('PORT', 5000))   # Changed default to 8000 (common for prod)
+    port = int(os.getenv('METRICS_PORT', 5002))
 
-    print(f"\n{'='*60}", flush=True)
-    print(f"🚀 Order Analysis Workflow Server (FastAPI + Gunicorn)", flush=True)
-    print(f"{'='*60}", flush=True)
-    print(f"📡 Server: http://{host}:{port}", flush=True)
+    print(f"\n{'='*70}", flush=True)
+    print(f"📊 METRICS SERVICE - Metric & Chart Calculations", flush=True)
+    print(f"{'='*70}", flush=True)
+    print(f"📡 Service: http://{host}:{port}", flush=True)
     print(f"❤️  Health: http://{host}:{port}/health", flush=True)
     print(f"📝 Examples: http://{host}:{port}/examples", flush=True)
-    print(f"🧠 Plan: POST http://{host}:{port}/plan", flush=True)
-    print(f"🔍 Query: POST http://{host}:{port}/query", flush=True)
-    print(f"🧠 Reasoning: http://{host}:{port}/reasoning/", flush=True)
+    print(f"📦 Orders: POST http://{host}:{port}/orders/metrics", flush=True)
+    print(f"💰 Revenue: POST http://{host}:{port}/revenue/chart/line", flush=True)
+    print(f"💳 Payment: POST http://{host}:{port}/payment/chart/radial", flush=True)
+    print(f"❌ Cancellation: POST http://{host}:{port}/cancellation/chart/bar", flush=True)
+    print(f"🗺️  Geography: POST http://{host}:{port}/geography/chart/pincode", flush=True)
     print(f"📖 Docs: http://{host}:{port}/docs", flush=True)
     print(f"📋 ReDoc: http://{host}:{port}/redoc", flush=True)
-    print(f"{'='*60}\n", flush=True)
+    print(f"{'='*70}\n", flush=True)
 
 
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
-    """Attach a stable request id for correlation across query processing and log polling."""
+    """Attach a stable request id for correlation and logging."""
     incoming_request_id = request.headers.get("X-Request-ID")
     request_id = incoming_request_id or str(uuid.uuid4())[:8]
     request.state.request_id = request_id
@@ -153,11 +163,23 @@ app.add_middleware(
 
 # Include routers
 app.include_router(health_router)
-app.include_router(query_router)
 app.include_router(orders_router)
 app.include_router(revenue_router)
 app.include_router(payment_router)
 app.include_router(cancellation_router)
 app.include_router(geography_router)
 app.include_router(history_orders_router)
-# app.include_router(reasoning_router)
+app.include_router(prediction_router)
+
+
+@app.on_event("startup")
+async def on_startup():
+    """Run startup event"""
+    await startup_event()
+
+
+if __name__ == "__main__":
+    import uvicorn
+    host = os.getenv('HOST', '0.0.0.0')
+    port = int(os.getenv('METRICS_PORT', 5002))
+    uvicorn.run(app, host=host, port=port)
