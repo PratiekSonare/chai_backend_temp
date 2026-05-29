@@ -10,7 +10,10 @@ celery_app = Celery(
     "history_kpi_cache",
     broker=REDIS_URL,
     backend=REDIS_URL,
-    include=["celery_tasks"],
+    include=[
+        "celery_tasks",
+        "celery_batch_scoring",  # NEW: Batch scoring tasks
+    ],
 )
 
 celery_app.conf.update(

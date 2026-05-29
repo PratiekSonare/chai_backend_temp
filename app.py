@@ -73,6 +73,7 @@ from routes.cancellation import router as cancellation_router
 from routes.geography import router as geography_router
 from routes.historyOrders import router as history_orders_router
 from routes.prediction import router as prediction_router
+from routes.batch_scoring import router as batch_scoring_router
 
 
 app = FastAPI(
@@ -170,6 +171,7 @@ app.include_router(cancellation_router)
 app.include_router(geography_router)
 app.include_router(history_orders_router)
 app.include_router(prediction_router)
+app.include_router(batch_scoring_router)
 
 
 @app.on_event("startup")

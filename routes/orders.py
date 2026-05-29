@@ -300,7 +300,7 @@ def get_orders_by_date_range(request: DateRangeOrdersRequest):
         metrics_request = OrdersMetricsRequest(orders=orders)
         metrics_response = calculate_orders_metrics(metrics_request)
 
-        print('metrics: ', metrics_response, flush=True);
+        # print('metrics: ', metrics_response, flush=True);
         return convert_numpy_types({
             "success": True,
             "orders": orders,
