@@ -322,7 +322,9 @@ def _repair_json(text: str) -> Optional[Dict | List]:
 
 #for any metric, data calculation, first convert to dataframe and then continue.
 def convert_to_df(raw: list) -> pd.DataFrame:
-    """Convert raw JSON order data to normalized DataFrame"""
+    """Convert raw JSON order data to normalized DataFrame with optimized chunking"""
+    import time
+    start_time = time.time()
     
     orders = []
     try:
@@ -359,6 +361,8 @@ def convert_to_df(raw: list) -> pd.DataFrame:
     if orders is None:
         orders = []
 
+    print(f"⏱️  Converting {len(orders)} orders to DataFrame...", flush=True)
+
     # Explode suborders: each suborder becomes a row, with suborder_ prefix for its fields
     exploded_rows = []
     for order in orders:
@@ -376,7 +380,25 @@ def convert_to_df(raw: list) -> pd.DataFrame:
             row = {k: v for k, v in order.items() if k != 'suborders'}
             exploded_rows.append(row)
 
-    df = pd.json_normalize(exploded_rows)
+    print(f"  Exploded to {len(exploded_rows)} rows (suborder expansion), chunking normalization...", flush=True)
+
+    # Chunk the normalization for better performance on large datasets
+    CHUNK_SIZE = 5000  # Process 5k rows at a time
+    dfs = []
+    for i in range(0, len(exploded_rows), CHUNK_SIZE):
+        chunk = exploded_rows[i:i + CHUNK_SIZE]
+        chunk_df = pd.json_normalize(chunk)
+        dfs.append(chunk_df)
+        print(f"  Normalized chunk {i//CHUNK_SIZE + 1} ({len(chunk)} rows)", flush=True)
+    
+    # Concatenate all chunks
+    if dfs:
+        df = pd.concat(dfs, ignore_index=True)
+    else:
+        df = pd.DataFrame()
+    
+    elapsed = time.time() - start_time
+    print(f"✅ DataFrame ready: {len(df)} rows in {elapsed:.2f}s", flush=True)
 
     # print("========================")
     # print("columns:", list(df.columns), flush=True)
@@ -1107,6 +1129,17 @@ def execute_custom_calculation(
 
         result = convert_numpy_types(result)
 
+        # If it's a simple scalar or string, return just the value to make it easier for LLM to read
+        if isinstance(result, (int, float, str, bool)) or result is None:
+            return {
+                "success": True,
+                "metric_name": metric_name,
+                "result": result,
+                "calculation_code": calculation_code,
+                "row_count": len(table),
+                "summary": str(result)
+            }
+
         return {
             "success": True,
             "metric_name": metric_name,
@@ -1159,11 +1192,22 @@ def apply_filters(table: List[Dict], filters: List[Dict]) -> List[Dict]:
     for filter_spec in filters:
         field = filter_spec.get("field")
         operator = filter_spec.get("operator", "eq")
+        
+        # Normalize operator: '==' to 'eq'
+        if operator == "==":
+            operator = "eq"
+        
         value = filter_spec.get("value")
         
         # Debug logging
         print(f"[DEBUG FILTER] Field: {field}, Operator: {operator}, Value: {value} (type: {type(value).__name__})", flush=True)
         
+        # Handle case-insensitive field lookup for top-level keys
+        if table and isinstance(table[0], dict):
+            available_keys = {k.lower(): k for k in table[0].keys()}
+            if field.lower() in available_keys:
+                field = available_keys[field.lower()]
+
         # Special handling for fields nested in suborders array
         if field in NESTED_FIELDS:
             before_count = len(filtered_data)

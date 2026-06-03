@@ -68,6 +68,7 @@ def custom_json_encoder(obj):
 # Import route modules
 from routes.health import router as health_router
 from routes.query import router as query_router
+from routes.query_v2 import router as query_v2_router
 
 
 app = FastAPI(
@@ -89,6 +90,8 @@ async def startup_event():
     print(f"📝 Examples: http://{host}:{port}/examples", flush=True)
     print(f"🧠 Plan: POST http://{host}:{port}/plan", flush=True)
     print(f"🔍 Query: POST http://{host}:{port}/query", flush=True)
+    print(f"🧠 Plan V2: POST http://{host}:{port}/query-v2/plan", flush=True)
+    print(f"🔍 Query V2: POST http://{host}:{port}/query-v2/query", flush=True)
     print(f"📖 Docs: http://{host}:{port}/docs", flush=True)
     print(f"📋 ReDoc: http://{host}:{port}/redoc", flush=True)
     print(f"{'='*70}\n", flush=True)
@@ -156,6 +159,7 @@ app.add_middleware(
 # Include routers
 app.include_router(health_router)
 app.include_router(query_router)
+app.include_router(query_v2_router)
 
 
 @app.on_event("startup")
