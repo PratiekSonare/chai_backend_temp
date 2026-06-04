@@ -23,7 +23,13 @@ with warnings.catch_warnings():
     from tools import (
         ORDERS_TOOL_REGISTRY,
         PROFIT_TOOL_REGISTRY,
-        PAYMENT_CYCLE_TOOL_REGISTRY
+        PAYMENT_CYCLE_TOOL_REGISTRY,
+        PRODUCT_TOOL_REGISTRY,
+        list_sku_files,
+        get_sku_metrics_json,
+        get_insights_json,
+        get_metrics_presets,
+        build_sku_index_summary,
     )
     from data_schema import (
         validate_filter_field, 
@@ -34,11 +40,12 @@ with warnings.catch_warnings():
     )
     from generated_tools import ALL_GENERATED_TOOLS
     try:
-        from utils.request_log_store import append_request_log, read_request_logs
+        from utils.request_log_store import append_request_log, read_request_logs, get_latest_sequence
     except Exception:
         # Fallback if request_log_store doesn't exist
         def append_request_log(**kwargs): pass
         def read_request_logs(*args, **kwargs): return []
+        def get_latest_sequence(*args, **kwargs): return 0
 
 # Initialize Gemini client
 client = genai.Client(api_key=os.getenv('GEMINI_KEY'))
@@ -222,9 +229,33 @@ MEMORY_STORE = {}
 _QUERY_CANCEL_LOCK = threading.Lock()
 _QUERY_CANCEL_REGISTRY: Dict[str, Dict] = {}
 
+# Session conversation history (session_id -> list of messages)
+SESSION_STORE: Dict[str, List[types.Content]] = {}
+SESSION_MAX_HISTORY = 20  # max messages to keep per session
+
 # Categorization cache (query_hash -> (query_type, data_source, timestamp))
 _CATEGORIZATION_CACHE: Dict[str, Tuple[str, str, datetime]] = {}
 _CACHE_TTL_SECONDS = 3600  # 1 hour
+
+# SKU index cache (avoids re-fetching from S3 on every request)
+_SKU_INDEX_CACHE: Dict[str, Any] = {"data": None, "timestamp": None}
+SKU_INDEX_TTL_SECONDS = 3600  # 1 hour
+
+
+def get_cached_sku_index() -> str:
+    """Return the cached SKU index summary, refreshing from S3 if stale."""
+    now = datetime.now()
+    if _SKU_INDEX_CACHE["data"] and _SKU_INDEX_CACHE["timestamp"]:
+        if (now - _SKU_INDEX_CACHE["timestamp"]).seconds < SKU_INDEX_TTL_SECONDS:
+            return _SKU_INDEX_CACHE["data"]
+    try:
+        _SKU_INDEX_CACHE["data"] = build_sku_index_summary()
+        _SKU_INDEX_CACHE["timestamp"] = now
+    except Exception as e:
+        print(f"Warning: Could not build SKU index: {e}")
+        if not _SKU_INDEX_CACHE["data"]:
+            _SKU_INDEX_CACHE["data"] = "(SKU metrics unavailable)"
+    return _SKU_INDEX_CACHE["data"]
 
 router = APIRouter()
 
@@ -232,9 +263,50 @@ router = APIRouter()
 # HELPER FUNCTIONS
 # ===================================================================
 
+def get_session_history(session_id: str) -> List[types.Content]:
+    """Retrieve conversation history for a session"""
+    return SESSION_STORE.get(session_id, [])
+
+
+def save_to_session_history(session_id: str, messages: List[types.Content]) -> None:
+    """Save messages to session history, trimming to max length"""
+    if session_id not in SESSION_STORE:
+        SESSION_STORE[session_id] = []
+    
+    SESSION_STORE[session_id].extend(messages)
+    
+    # Trim to max history (keep most recent messages)
+    if len(SESSION_STORE[session_id]) > SESSION_MAX_HISTORY:
+        SESSION_STORE[session_id] = SESSION_STORE[session_id][-SESSION_MAX_HISTORY:]
+
+
+def clear_session_history(session_id: str) -> None:
+    """Clear conversation history for a session"""
+    SESSION_STORE.pop(session_id, None)
+
+
 def get_current_date_str() -> str:
     """Get current date and time as formatted string"""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def generate_date_range_instruction() -> str:
+    """Generate date range examples based on today's date for LLM context"""
+    today = datetime.now()
+    yesterday = today - timedelta(days=1)
+    week_ago = today - timedelta(days=7)
+    month_ago = today - timedelta(days=30)
+    
+    return f"""DATE HANDLING GUIDE (Today is {today.strftime('%Y-%m-%d')}):
+When user says:
+- "yesterday" → start_date="{yesterday.strftime('%Y-%m-%d')}", end_date="{today.strftime('%Y-%m-%d')}"
+- "today" → start_date="{today.strftime('%Y-%m-%d')}", end_date="{today.strftime('%Y-%m-%d')}"
+- "last 7 days" / "past week" → start_date="{week_ago.strftime('%Y-%m-%d')}", end_date="{today.strftime('%Y-%m-%d')}"
+- "last 30 days" / "past month" → start_date="{month_ago.strftime('%Y-%m-%d')}", end_date="{today.strftime('%Y-%m-%d')}"
+- "last N days" → subtract N days from today to get start_date
+- Specific date like "2026-01-15" → use that date as start_date and end_date (or date range if specified)
+
+ALWAYS convert relative dates to the exact format YYYY-MM-DD before calling get_all_orders."""
 
 
 def generate_content_with_fallback(contents, config=None, initial_model: str = "gemini-2.5-flash", openai_tools: list = None, system_instruction: str = None) -> Any:
@@ -325,6 +397,7 @@ def generate_content_with_fallback(contents, config=None, initial_model: str = "
 
 class QueryV2Request(BaseModel):
     query: str
+    session_id: Optional[str] = None
 
 
 class PlanV2Response(BaseModel):
@@ -338,6 +411,7 @@ class PlanV2Response(BaseModel):
 class QueryV2Response(BaseModel):
     success: bool
     request_id: str
+    session_id: Optional[str] = None
     query: str
     query_type: str
     data_source: str
@@ -578,6 +652,52 @@ def process_tool_call(tool_name: str, tool_args: dict, data_source: str = "order
             MEMORY_STORE[ref_key] = data
             return f"SUCCESS: Fetched {len(data)} distributor records. Reference: '{ref_key}'."
 
+        # Product / SKU Metrics Tools
+        if tool_name in ["get_sku_index", "list_sku_files"]:
+            try:
+                sku_list = list_sku_files()
+                index_summary = get_cached_sku_index()
+                return f"SUCCESS: {len(sku_list)} SKUs available.\n\n{index_summary}"
+            except Exception as e:
+                return f"ERROR: Could not list SKUs: {str(e)}"
+
+        if tool_name == "get_sku_metrics":
+            sku = tool_args.get("sku")
+            if not sku:
+                return "ERROR: 'sku' parameter is required."
+            try:
+                data = get_sku_metrics_json(sku)
+                if "error" in data:
+                    return f"ERROR: {data['error']}"
+                ref_key = f"sku_metrics_{sku}"
+                MEMORY_STORE[ref_key] = data
+                return f"SUCCESS: Fetched metrics for SKU '{sku}'. Reference: '{ref_key}'. Data: {json.dumps(data)[:2000]}"
+            except Exception as e:
+                return f"ERROR: Could not fetch SKU metrics: {str(e)}"
+
+        if tool_name == "get_insights":
+            try:
+                data = get_insights_json()
+                if "error" in data:
+                    return f"ERROR: {data['error']}"
+                ref_key = "sku_insights"
+                MEMORY_STORE[ref_key] = data
+                return f"SUCCESS: Fetched SKU insights. Reference: '{ref_key}'. Data: {json.dumps(data)[:3000]}"
+            except Exception as e:
+                return f"ERROR: Could not fetch insights: {str(e)}"
+
+        if tool_name == "get_metrics_presets":
+            time_window = tool_args.get("time_window", "7d")
+            try:
+                data = get_metrics_presets(time_window)
+                if "error" in data:
+                    return f"ERROR: {data['error']}"
+                ref_key = f"metrics_presets_{time_window}"
+                MEMORY_STORE[ref_key] = data
+                return f"SUCCESS: Fetched metrics presets for '{time_window}'. Reference: '{ref_key}'. Data: {json.dumps(data)[:3000]}"
+            except Exception as e:
+                return f"ERROR: Could not fetch metrics presets: {str(e)}"
+
         # 2. Handle Schema tool
         if tool_name in ["get_schema", "get_schema_info"]:
             ds = tool_args.get("data_source") or tool_args.get("entity") or data_source
@@ -797,11 +917,16 @@ WORKFLOW:
 1. Call get_schema_info(entity='orders') to show all fields
 2. Explain what filters are available
 3. Suggest example queries""",
-            "tools": ["get_schema_info", "get_all_orders"],
+            "tools": ["get_schema_info", "get_all_orders", "get_sku_index", "get_sku_metrics"],
         },
         "STANDARD_QUERY": {
             "system_instruction": """You are a Data Retrieval Agent for Orders.
 Answer metric queries on order data using specific tools.
+
+DATE RANGE HANDLING:
+- If the user specifies a date range (e.g., "in the last 7 days", "since Monday", "from Jan 1"), use that range.
+- **IF NO DATE RANGE IS SPECIFIED, DEFAULT TO THE LAST 7 DAYS** (past week).
+- Always convert relative dates (yesterday, today, last N days) to concrete YYYY-MM-DD format.
 
 ALLOWED OPERATORS for filters:
 - 'eq': equal to (standard)
@@ -814,12 +939,13 @@ ALLOWED OPERATORS for filters:
 - 'in': value is in list
 
 WORKFLOW:
-1. get_all_orders(start_date, end_date) -> creates a reference (e.g. 'orders_2026-02-01')
-2. Optional: apply_filters(table, filters) -> creates a filtered reference. 
+1. Determine the date range: Parse user dates OR use default (last 7 days).
+2. get_all_orders(start_date, end_date) with the determined date range.
+3. Optional: apply_filters(table, filters) -> creates a filtered reference.
    - ALWAYS use 'eq' for exact matches. 
    - Field names must match the schema exactly (e.g., 'state', 'city', 'order_status').
-3. Optional: convert_to_df(raw) -> converts raw data to DataFrame reference (needed for most metrics)
-4. Call specific metric tools (e.g., get_aov, get_total_revenue) using the DataFrame reference.
+4. Optional: convert_to_df(raw) -> converts raw data to DataFrame reference (needed for most metrics)
+5. Call specific metric tools (e.g., get_aov, get_total_revenue) using the DataFrame reference.
 
 Always prefer specific tools over custom calculations if they exist.""",
             "tools": [
@@ -832,37 +958,51 @@ Always prefer specific tools over custom calculations if they exist.""",
                 "get_statistical_summary", "get_percentile", "get_top_percentile",
                 "get_bottom_percentile", "get_correlation_matrix", "get_conversion_rate",
                 "get_cod_vs_prepaid_metrics", "get_geographic_insights", "get_common_metrics",
-                "execute_custom_calculation", "get_schema_info"
+                "execute_custom_calculation", "get_schema_info",
+                "get_sku_index", "get_sku_metrics", "get_insights", "get_metrics_presets"
             ],
         },
         "COMPARISON_QUERY": {
             "system_instruction": """You are a Comparison Analyst for Orders.
 Compare metrics across payment modes, marketplaces, states, or other groups.
 
+DATE RANGE HANDLING:
+- If the user specifies a date range (e.g., "in the last 7 days", "since Monday", "from Jan 1"), use that range.
+- **IF NO DATE RANGE IS SPECIFIED, DEFAULT TO THE LAST 7 DAYS** (past week).
+- Always convert relative dates (yesterday, today, last N days) to concrete YYYY-MM-DD format.
+
 WORKFLOW:
-1. get_all_orders(start_date, end_date)
-2. For EACH group:
+1. Determine the date range: Parse user dates OR use default (last 7 days).
+2. get_all_orders(start_date, end_date) with the determined date range.
+3. For EACH group to compare:
    a. apply_filters(table, [{"field": "...", "operator": "eq", "value": "..."}])
-   b. Call metric tools on the filtered data
-3. Present comparison. 
+   b. Call metric tools (get_aov, get_total_revenue, etc.) on the filtered data
+4. Present side-by-side comparison with key metrics.
 
 If no specific tool compares what you need, first convert to DataFrame using convert_to_df, then use execute_custom_calculation on each filtered group or on the main DataFrame with a groupby.""",
             "tools": [
                 "get_all_orders", "apply_filters", "convert_to_df", "get_aov", 
                 "get_total_revenue", "get_order_count", "get_common_metrics",
                 "get_cod_vs_prepaid_metrics", "get_geographic_insights",
-                "execute_custom_calculation"
+                "execute_custom_calculation",
+                "get_sku_index", "get_sku_metrics", "get_insights"
             ],
         },
         "METRIC_ANALYSIS": {
             "system_instruction": """You are a Metric Analyst for Orders.
 Find patterns: top cities, top states, distributions, etc.
 
+DATE RANGE HANDLING:
+- If the user specifies a date range (e.g., "in the last 7 days", "since Monday", "from Jan 1"), use that range.
+- **IF NO DATE RANGE IS SPECIFIED, DEFAULT TO THE LAST 7 DAYS** (past week).
+- Always convert relative dates (yesterday, today, last N days) to concrete YYYY-MM-DD format.
+
 FALLBACK FOR COMPLEX QUERIES:
 If no specific tool fits (e.g., "highest selling SKU", "orders with > 2 items"), use this REPL workflow:
-1. get_all_orders(start_date, end_date)
-2. convert_to_df(raw) -> creates a DataFrame reference (e.g., 'orders_2026-02-01_df')
-3. execute_custom_calculation(table, calculation_code, metric_name) -> write Pandas code.
+1. Determine the date range: Parse user dates OR use default (last 7 days).
+2. get_all_orders(start_date, end_date) with the determined date range.
+3. convert_to_df(raw) -> creates a DataFrame reference (e.g., 'orders_2026-02-01_df')
+4. execute_custom_calculation(table, calculation_code, metric_name) -> write Pandas code.
    - USE THE DATAFRAME REFERENCE for the 'table' argument.
    - The DataFrame 'df' has exploded suborders. Fields: suborder_sku, suborder_quantity, suborder_selling_price, total_amount, payment_mode, marketplace, state, city.
    - Example to find top SKU: result = df['suborder_sku'].value_counts().idxmax()
@@ -872,7 +1012,8 @@ If no specific tool fits (e.g., "highest selling SKU", "orders with > 2 items"),
                 "get_order_status_distribution", "get_payment_mode_distribution", 
                 "get_marketplace_distribution", "get_state_wise_distribution",
                 "get_city_wise_distribution", "get_statistical_summary", "get_correlation_matrix",
-                "execute_custom_calculation"
+                "execute_custom_calculation",
+                "get_sku_index", "get_sku_metrics", "get_insights", "get_metrics_presets"
             ],
         },
     },
@@ -886,31 +1027,64 @@ Help users understand profit metrics available.""",
             "system_instruction": """You are a Profit Metrics Agent.
 Calculate profit metrics for vendors/SKUs.
 
+DATE RANGE HANDLING:
+- If the user specifies a date range (e.g., "in the last 7 days", "since Monday", "from Jan 1"), use that range.
+- **IF NO DATE RANGE IS SPECIFIED, DEFAULT TO THE LAST 7 DAYS** (past week).
+- Always convert relative dates (yesterday, today, last N days) to concrete YYYY-MM-DD format.
+
 WORKFLOW:
-1. get_vendor_cost_sheet() -> creates 'profit_vendor_cost_sheet' reference
-2. Optional: apply_filters(table, filters)
-3. Call specific profit tools (get_margin, get_gross_profit, etc.)""",
+1. Determine the date range: Parse user dates OR use default (last 7 days).
+2. get_vendor_cost_sheet() -> creates 'profit_vendor_cost_sheet' reference
+3. Optional: apply_filters(table, filters)
+4. Call specific profit tools (get_margin, get_gross_profit, etc.)""",
             "tools": [
                 "get_vendor_cost_sheet", "apply_filters", "get_cost_price",
                 "get_selling_price", "get_gross_profit", "get_margin",
                 "get_markup", "get_cost_to_price_ratio", "execute_custom_calculation",
                 "get_statistical_summary", "get_percentile", "get_top_percentile",
-                "get_bottom_percentile", "get_correlation_matrix"
+                "get_bottom_percentile", "get_correlation_matrix",
+                "get_sku_metrics"
             ],
         },
         "COMPARISON_QUERY": {
             "system_instruction": """You are a Profit Comparison Analyst.
-Compare profitability across vendors, categories, etc.""",
+Compare profitability across vendors, categories, etc.
+
+DATE RANGE HANDLING:
+- If the user specifies a date range (e.g., "in the last 7 days", "since Monday", "from Jan 1"), use that range.
+- **IF NO DATE RANGE IS SPECIFIED, DEFAULT TO THE LAST 7 DAYS** (past week).
+- Always convert relative dates (yesterday, today, last N days) to concrete YYYY-MM-DD format.
+
+WORKFLOW:
+1. Determine the date range: Parse user dates OR use default (last 7 days).
+2. get_vendor_cost_sheet() -> creates 'profit_vendor_cost_sheet' reference
+3. For EACH group to compare:
+   a. apply_filters(table, filters) for each vendor/category
+   b. Call metric tools (get_margin, get_gross_profit) on each group
+4. Present side-by-side comparison.""",
             "tools": [
-                "get_vendor_cost_sheet", "apply_filters", "get_margin", "get_gross_profit"
+                "get_vendor_cost_sheet", "apply_filters", "get_margin", "get_gross_profit",
+                "get_sku_metrics"
             ],
         },
         "METRIC_ANALYSIS": {
             "system_instruction": """You are a Profit Analysis Agent.
-Find high-margin SKUs, cost outliers, correlation patterns.""",
+Find high-margin SKUs, cost outliers, correlation patterns.
+
+DATE RANGE HANDLING:
+- If the user specifies a date range (e.g., "in the last 7 days", "since Monday", "from Jan 1"), use that range.
+- **IF NO DATE RANGE IS SPECIFIED, DEFAULT TO THE LAST 7 DAYS** (past week).
+- Always convert relative dates (yesterday, today, last N days) to concrete YYYY-MM-DD format.
+
+WORKFLOW:
+1. Determine the date range: Parse user dates OR use default (last 7 days).
+2. get_vendor_cost_sheet() -> creates 'profit_vendor_cost_sheet' reference
+3. apply_filters(table, filters) for analysis
+4. Call specific profit tools or use execute_custom_calculation for deeper analysis.""",
             "tools": [
                 "get_vendor_cost_sheet", "apply_filters", "get_margin", 
-                "get_statistical_summary", "get_top_percentile", "get_correlation_matrix"
+                "get_statistical_summary", "get_top_percentile", "get_correlation_matrix",
+                "get_sku_metrics"
             ],
         },
     },
@@ -922,7 +1096,18 @@ Help users understand distributor payment terms and cash discount data.""",
         },
         "STANDARD_QUERY": {
             "system_instruction": """You are a Payment Cycle Agent.
-Answer questions about distributor payment terms and margins.""",
+Answer questions about distributor payment terms and margins.
+
+DATE RANGE HANDLING:
+- If the user specifies a date range (e.g., "in the last 7 days", "since Monday", "from Jan 1"), use that range.
+- **IF NO DATE RANGE IS SPECIFIED, DEFAULT TO THE LAST 7 DAYS** (past week).
+- Always convert relative dates (yesterday, today, last N days) to concrete YYYY-MM-DD format.
+
+WORKFLOW:
+1. Determine the date range: Parse user dates OR use default (last 7 days).
+2. get_payment_cycle_data(distributor_name) -> fetches payment cycle data
+3. Optional: apply_filters(table, filters) if needed
+4. Call metric tools to analyze payment terms and margins.""",
             "tools": [
                 "get_payment_cycle_data", "apply_filters", "get_avg_margin",
                 "get_weighted_avg_margin", "get_margin_per_payment_day",
@@ -934,14 +1119,38 @@ Answer questions about distributor payment terms and margins.""",
         },
         "COMPARISON_QUERY": {
             "system_instruction": """You are a Distributor Comparison Analyst.
-Compare payment terms, margins, and cash discounts across distributors.""",
+Compare payment terms, margins, and cash discounts across distributors.
+
+DATE RANGE HANDLING:
+- If the user specifies a date range (e.g., "in the last 7 days", "since Monday", "from Jan 1"), use that range.
+- **IF NO DATE RANGE IS SPECIFIED, DEFAULT TO THE LAST 7 DAYS** (past week).
+- Always convert relative dates (yesterday, today, last N days) to concrete YYYY-MM-DD format.
+
+WORKFLOW:
+1. Determine the date range: Parse user dates OR use default (last 7 days).
+2. get_payment_cycle_data() -> fetches all distributor data
+3. For EACH distributor/group to compare:
+   a. apply_filters(table, filters) for each group
+   b. Call metric tools on each group
+4. Present side-by-side comparison of payment terms and margins.""",
             "tools": [
                 "get_payment_cycle_data", "apply_filters", "get_avg_margin", "get_cash_discount_stats"
             ],
         },
         "METRIC_ANALYSIS": {
             "system_instruction": """You are a Payment Cycle Risk Analyst.
-Identify high-risk distributors, payment cycle patterns, margin exposure.""",
+Identify high-risk distributors, payment cycle patterns, margin exposure.
+
+DATE RANGE HANDLING:
+- If the user specifies a date range (e.g., "in the last 7 days", "since Monday", "from Jan 1"), use that range.
+- **IF NO DATE RANGE IS SPECIFIED, DEFAULT TO THE LAST 7 DAYS** (past week).
+- Always convert relative dates (yesterday, today, last N days) to concrete YYYY-MM-DD format.
+
+WORKFLOW:
+1. Determine the date range: Parse user dates OR use default (last 7 days).
+2. get_payment_cycle_data() -> fetches distributor payment cycle data
+3. apply_filters(table, filters) if needed for specific analysis
+4. Call risk analysis tools to identify patterns and high-risk distributors.""",
             "tools": [
                 "get_payment_cycle_data", "apply_filters", "get_high_risk_distributors",
                 "get_payment_cycle_distribution", "get_cycle_efficiency_score"
@@ -1002,6 +1211,7 @@ async def process_query_v2(
     """
     user_query = request.query.strip()
     request_id = getattr(raw_request.state, "request_id", None) or x_request_id or str(uuid.uuid4())[:8]
+    session_id = request.session_id or str(uuid.uuid4())[:12]
     
     register_active_query(request_id)
     
@@ -1037,19 +1247,30 @@ async def process_query_v2(
         tool_names = prompt_config["tools"]
         tools = get_tool_definitions(tool_names)
         
-        # Prepend current date/time and schema to system instruction
+        # Prepend current date/time, date range handling, schema, and SKU index to system instruction
         schema_prompt = get_schema_prompt(data_source)
-        system_instruction_with_date = f"Today's date and time is {get_current_date_str()}.\n\n{system_instruction}\n\n{schema_prompt}"
+        date_range_guidance = generate_date_range_instruction()
+        sku_index = get_cached_sku_index()
+        system_instruction_with_date = (
+            f"Today's date and time is {get_current_date_str()}.\n\n"
+            f"{date_range_guidance}\n\n"
+            f"{system_instruction}\n\n"
+            f"{schema_prompt}\n\n"
+            f"## Available Products (SKU Index)\n{sku_index}\n\n"
+            f"When the user asks about specific products, SKUs, or product performance metrics, "
+            f"use get_sku_metrics(sku) for detailed per-SKU data, get_insights() for cross-SKU trends and rankings, "
+            f"or get_metrics_presets(time_window) for aggregated dashboard KPIs."
+        )
         
         print(f"🛠️  Using tools: {', '.join(tool_names)}")
         
         # Pre-convert tools for OpenRouter fallback
         openai_tools = _convert_gemini_tools_to_openai(tools)
         
-        # Initialize conversation
-        messages = [
-            types.Content(role="user", parts=[types.Part(text=user_query)])
-        ]
+        # Load session history and initialize conversation
+        session_history = get_session_history(session_id)
+        messages = list(session_history)  # copy prior messages
+        messages.append(types.Content(role="user", parts=[types.Part(text=user_query)]))
         
         max_iterations = 10
         iteration = 0
@@ -1095,6 +1316,12 @@ async def process_query_v2(
                 # No tool calls - this is the final answer
                 final_answer = response.text
                 print(f"\n✅ Final Answer:\n{final_answer}")
+                
+                # Save conversation to session history
+                save_to_session_history(session_id, [
+                    types.Content(role="user", parts=[types.Part(text=user_query)]),
+                    types.Content(role="model", parts=[types.Part(text=final_answer)])
+                ])
                 
                 append_request_log(
                     request_id=request_id,
@@ -1160,6 +1387,7 @@ async def process_query_v2(
         final_response = {
             "success": extracted_data is not None,
             "request_id": request_id,
+            "session_id": session_id,
             "query": user_query,
             "query_type": query_type,
             "data_source": data_source,
@@ -1228,6 +1456,38 @@ async def cancel_query_v2(request_id: str):
                 "error": str(e)
             }
         )
+
+
+@router.post('/query-v2/{session_id}/reset')
+async def reset_session(session_id: str):
+    """Clear conversation history for a session."""
+    try:
+        clear_session_history(session_id)
+        return {
+            "success": True,
+            "session_id": session_id,
+            "message": "Session history cleared"
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "success": False,
+                "error": str(e)
+            }
+        )
+
+
+@router.get('/query-v2/logs/{request_id}')
+async def get_query_v2_logs(request_id: str, since: int = 0):
+    """Poll logs for a running query V2 execution."""
+    logs = read_request_logs(request_id, since_sequence=since)
+    return {
+        "success": True,
+        "request_id": request_id,
+        "logs": logs,
+        "next_sequence": get_latest_sequence(request_id)
+    }
 
 
 # ===================================================================

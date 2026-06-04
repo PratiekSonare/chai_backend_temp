@@ -320,6 +320,41 @@ def _repair_json(text: str) -> Optional[Dict | List]:
         return None
 
 
+# ===================================================================
+# REFERENCE RESOLUTION HELPER
+# ===================================================================
+def _resolve_dataframe_reference(table_param, func_name: str = "unknown") -> Optional[pd.DataFrame]:
+    """
+    Safely resolve a table parameter that may be either a DataFrame or a string reference ID.
+    If a string reference is provided but not found in MEMORY_STORE, returns None with error logging.
+    """
+    # If it's already a DataFrame, return it
+    if isinstance(table_param, pd.DataFrame):
+        return table_param
+    
+    # If it's a string reference, try to resolve it from MEMORY_STORE
+    if isinstance(table_param, str):
+        try:
+            from routes.query_v2 import MEMORY_STORE
+            if table_param in MEMORY_STORE:
+                resolved = MEMORY_STORE[table_param]
+                if isinstance(resolved, pd.DataFrame):
+                    return resolved
+                else:
+                    print(f"Error in {func_name}: Reference '{table_param}' exists but is not a DataFrame (type: {type(resolved).__name__})")
+                    return None
+            else:
+                print(f"Error in {func_name}: Data reference '{table_param}' not found in MEMORY_STORE")
+                return None
+        except ImportError:
+            print(f"Error in {func_name}: Could not import MEMORY_STORE")
+            return None
+    
+    # Invalid type
+    print(f"Error in {func_name}: Expected DataFrame or string reference, got {type(table_param).__name__}")
+    return None
+
+
 #for any metric, data calculation, first convert to dataframe and then continue.
 def convert_to_df(raw: list) -> pd.DataFrame:
     """Convert raw JSON order data to normalized DataFrame with optimized chunking"""
@@ -412,11 +447,10 @@ def convert_to_df(raw: list) -> pd.DataFrame:
 
 def get_aov(table: pd.DataFrame) -> float:
     """Calculate Average Order Value from orders DataFrame"""
-
-    print("----------------", flush=True)
-    print("table in get_aov:", flush=True)
-    print(table.head(10), flush=True)
-    print("----------------", flush=True)
+    # Resolve table reference if needed
+    table = _resolve_dataframe_reference(table, "get_aov")
+    if table is None:
+        return None
 
     try:
         if table.empty:
@@ -425,12 +459,17 @@ def get_aov(table: pd.DataFrame) -> float:
         result = round(aov, 2) if not pd.isna(aov) else 0.0
         return convert_numpy_types(result)
     except Exception as e:
-        print(f"Error in calculating AOV: {e}")
+        print(f"Error in get_aov: {e}")
         return None
 
 
 def get_total_revenue(table: pd.DataFrame) -> float:
     """Calculate total revenue from orders DataFrame"""
+    # Resolve table reference if needed
+    table = _resolve_dataframe_reference(table, "get_total_revenue")
+    if table is None:
+        return None
+
     try:
         if table.empty:
             return 0.0
@@ -438,93 +477,133 @@ def get_total_revenue(table: pd.DataFrame) -> float:
         result = round(revenue, 2) if not pd.isna(revenue) else 0.0
         return convert_numpy_types(result)
     except Exception as e:
-        print(f"Error in calculating total revenue: {e}")
+        print(f"Error in get_total_revenue: {e}")
         return None
 
 
 def get_order_count(table: pd.DataFrame) -> int:
     """Get total number of orders"""
+    # Resolve table reference if needed
+    table = _resolve_dataframe_reference(table, "get_order_count")
+    if table is None:
+        return None
+
     try:
         return len(table)
     except Exception as e:
-        print(f"Error in calculating order count: {e}")
+        print(f"Error in get_order_count: {e}")
         return None
 
 
 def get_order_status_distribution(table: pd.DataFrame) -> dict:
     """Get distribution of order statuses"""
+    # Resolve table reference if needed
+    table = _resolve_dataframe_reference(table, "get_order_status_distribution")
+    if table is None:
+        return None
+
     try:
         if table.empty or 'order_status' not in table.columns:
             return {}
         distribution = table['order_status'].value_counts().to_dict()
         return convert_numpy_types(distribution)
     except Exception as e:
-        print(f"Error in calculating order status distribution: {e}")
+        print(f"Error in get_order_status_distribution: {e}")
         return None
 
 
 def get_payment_mode_distribution(table: pd.DataFrame) -> dict:
     """Get distribution of payment modes"""
+    # Resolve table reference if needed
+    table = _resolve_dataframe_reference(table, "get_payment_mode_distribution")
+    if table is None:
+        return None
+
     try:
         if table.empty or 'payment_mode' not in table.columns:
             return {}
         distribution = table['payment_mode'].value_counts().to_dict()
         return convert_numpy_types(distribution)
     except Exception as e:
-        print(f"Error in calculating payment mode distribution: {e}")
+        print(f"Error in get_payment_mode_distribution: {e}")
         return None
 
 
 def get_marketplace_distribution(table: pd.DataFrame) -> dict:
     """Get distribution of orders by marketplace"""
+    # Resolve table reference if needed
+    table = _resolve_dataframe_reference(table, "get_marketplace_distribution")
+    if table is None:
+        return None
+
     try:
         if table.empty or 'marketplace' not in table.columns:
             return {}
         distribution = table['marketplace'].value_counts().to_dict()
         return convert_numpy_types(distribution)
     except Exception as e:
-        print(f"Error in calculating marketplace distribution: {e}")
+        print(f"Error in get_marketplace_distribution: {e}")
         return None
 
 
 def get_state_wise_distribution(table: pd.DataFrame) -> dict:
     """Get distribution of orders by state"""
+    # Resolve table reference if needed
+    table = _resolve_dataframe_reference(table, "get_state_wise_distribution")
+    if table is None:
+        return None
+
     try:
         if table.empty or 'state' not in table.columns:
             return {}
         distribution = table['state'].value_counts().to_dict()
         return convert_numpy_types(distribution)
     except Exception as e:
-        print(f"Error in calculating state distribution: {e}")
+        print(f"Error in get_state_wise_distribution: {e}")
         return None
 
 
 def get_city_wise_distribution(table: pd.DataFrame, top_n: int = 10) -> dict:
     """Get distribution of orders by city (top N cities)"""
+    # Resolve table reference if needed
+    table = _resolve_dataframe_reference(table, "get_city_wise_distribution")
+    if table is None:
+        return None
+
     try:
         if table.empty or 'city' not in table.columns:
             return {}
         distribution = table['city'].value_counts().head(top_n).to_dict()
         return convert_numpy_types(distribution)
     except Exception as e:
-        print(f"Error in calculating city distribution: {e}")
+        print(f"Error in get_city_wise_distribution: {e}")
         return None
 
 
 def get_courier_distribution(table: pd.DataFrame) -> dict:
     """Get distribution of orders by courier service"""
+    # Resolve table reference if needed
+    table = _resolve_dataframe_reference(table, "get_courier_distribution")
+    if table is None:
+        return None
+
     try:
         if table.empty or 'courier' not in table.columns:
             return {}
         distribution = table['courier'].value_counts().to_dict()
         return convert_numpy_types(distribution)
     except Exception as e:
-        print(f"Error in calculating courier distribution: {e}")
+        print(f"Error in get_courier_distribution: {e}")
         return None
 
 
 def get_average_discount(table: pd.DataFrame) -> float:
     """Calculate average discount amount"""
+    # Resolve table reference if needed
+    table = _resolve_dataframe_reference(table, "get_average_discount")
+    if table is None:
+        return None
+
     try:
         if table.empty:
             return 0.0
@@ -532,12 +611,17 @@ def get_average_discount(table: pd.DataFrame) -> float:
         result = round(avg_discount, 2) if not pd.isna(avg_discount) else 0.0
         return convert_numpy_types(result)
     except Exception as e:
-        print(f"Error in calculating average discount: {e}")
+        print(f"Error in get_average_discount: {e}")
         return None
 
 
 def get_average_shipping_charge(table: pd.DataFrame) -> float:
     """Calculate average shipping charge"""
+    # Resolve table reference if needed
+    table = _resolve_dataframe_reference(table, "get_average_shipping_charge")
+    if table is None:
+        return None
+
     try:
         if table.empty:
             return 0.0
@@ -545,12 +629,17 @@ def get_average_shipping_charge(table: pd.DataFrame) -> float:
         result = round(avg_shipping, 2) if not pd.isna(avg_shipping) else 0.0
         return convert_numpy_types(result)
     except Exception as e:
-        print(f"Error in calculating average shipping charge: {e}")
+        print(f"Error in get_average_shipping_charge: {e}")
         return None
 
 
 def get_average_tax(table: pd.DataFrame) -> float:
     """Calculate average tax amount"""
+    # Resolve table reference if needed
+    table = _resolve_dataframe_reference(table, "get_average_tax")
+    if table is None:
+        return None
+
     try:
         if table.empty:
             return 0.0
@@ -558,12 +647,17 @@ def get_average_tax(table: pd.DataFrame) -> float:
         result = round(avg_tax, 2) if not pd.isna(avg_tax) else 0.0
         return convert_numpy_types(result)
     except Exception as e:
-        print(f"Error in calculating average tax: {e}")
+        print(f"Error in get_average_tax: {e}")
         return None
 
 
 def get_conversion_rate(table: pd.DataFrame, success_status: str = 'Delivered') -> float:
     """Calculate order conversion rate based on successful deliveries"""
+    # Resolve table reference if needed
+    table = _resolve_dataframe_reference(table, "get_conversion_rate")
+    if table is None:
+        return None
+
     try:
         if table.empty:
             return 0.0
@@ -576,12 +670,17 @@ def get_conversion_rate(table: pd.DataFrame, success_status: str = 'Delivered') 
         conversion_rate = (successful_orders / total_orders) * 100
         return convert_numpy_types(round(conversion_rate, 2))
     except Exception as e:
-        print(f"Error in calculating conversion rate: {e}")
+        print(f"Error in get_conversion_rate: {e}")
         return None
 
 
 def get_cod_vs_prepaid_metrics(table: pd.DataFrame) -> dict:
     """Compare COD vs PrePaid payment methods"""
+    # Resolve table reference if needed
+    table = _resolve_dataframe_reference(table, "get_cod_vs_prepaid_metrics")
+    if table is None:
+        return None
+
     try:
         if table.empty:
             return {
@@ -622,7 +721,7 @@ def get_cod_vs_prepaid_metrics(table: pd.DataFrame) -> dict:
         }
         return convert_numpy_types(metrics)
     except Exception as e:
-        print(f"Error in calculating COD vs PrePaid metrics: {e}")
+        print(f"Error in get_cod_vs_prepaid_metrics: {e}")
         return None
 
 
@@ -670,6 +769,11 @@ def _error_response(metric_name: str, error: str, code: str) -> dict:
 
 def get_geographic_insights(table: pd.DataFrame, top_n: int = 5) -> dict:
     """Get geographic distribution insights"""
+    # Resolve table reference if needed
+    table = _resolve_dataframe_reference(table, "get_geographic_insights")
+    if table is None:
+        return None
+
     try:
         if table.empty or 'state' not in table.columns or 'city' not in table.columns:
             return {
@@ -682,16 +786,16 @@ def get_geographic_insights(table: pd.DataFrame, top_n: int = 5) -> dict:
         city_revenue = table.groupby('city')['total_amount'].agg(['count', 'sum', 'mean']).round(2)
         
         insights = {
-            'top_states_by_orders': state_revenue.nlargest(min(top_n, len(state_revenue)), 'count')['count'].to_dict() if state_revenue.empty == False else {},
-            'top_states_by_revenue': state_revenue.nlargest(min(top_n, len(state_revenue)), 'sum')['sum'].to_dict() if state_revenue.empty == False else {},
-            'top_cities_by_orders': city_revenue.nlargest(min(top_n, len(city_revenue)), 'count')['count'].to_dict() if city_revenue.empty == False else {},
-            'top_cities_by_revenue': city_revenue.nlargest(min(top_n, len(city_revenue)), 'sum')['sum'].to_dict() if city_revenue.empty == False else {},
-            'highest_aov_states': state_revenue.nlargest(min(top_n, len(state_revenue)), 'mean')['mean'].to_dict() if state_revenue.empty == False else {},
-            'highest_aov_cities': city_revenue.nlargest(min(top_n, len(city_revenue)), 'mean')['mean'].to_dict() if city_revenue.empty == False else {}
+            'top_states_by_orders': state_revenue.nlargest(min(top_n, len(state_revenue)), 'count')['count'].to_dict() if not state_revenue.empty else {},
+            'top_states_by_revenue': state_revenue.nlargest(min(top_n, len(state_revenue)), 'sum')['sum'].to_dict() if not state_revenue.empty else {},
+            'top_cities_by_orders': city_revenue.nlargest(min(top_n, len(city_revenue)), 'count')['count'].to_dict() if not city_revenue.empty else {},
+            'top_cities_by_revenue': city_revenue.nlargest(min(top_n, len(city_revenue)), 'sum')['sum'].to_dict() if not city_revenue.empty else {},
+            'highest_aov_states': state_revenue.nlargest(min(top_n, len(state_revenue)), 'mean')['mean'].to_dict() if not state_revenue.empty else {},
+            'highest_aov_cities': city_revenue.nlargest(min(top_n, len(city_revenue)), 'mean')['mean'].to_dict() if not city_revenue.empty else {}
         }
         return convert_numpy_types(insights)
     except Exception as e:
-        print(f"Error in calculating geographic insights: {e}")
+        print(f"Error in get_geographic_insights: {e}")
         return None
 
 
@@ -895,6 +999,11 @@ def get_schema_info(entity: str = "orders", field: str = None) -> Dict[str, Any]
 
 def get_cancelled_count(table: pd.DataFrame) -> dict:
     """Return count cancelled orders"""
+    # Resolve table reference if needed
+    table = _resolve_dataframe_reference(table, "get_cancelled_count")
+    if table is None:
+        return None
+
     try:
         if table.empty:
             return {
@@ -906,7 +1015,7 @@ def get_cancelled_count(table: pd.DataFrame) -> dict:
             "cancel_count": int(cancel_count) 
         }    
     except Exception as e:
-        print(f"Error in calculating geographic insights: {e}")
+        print(f"Error in get_cancelled_count: {e}")
         return None
 
 # ===================================================================
@@ -1345,6 +1454,11 @@ def apply_filters(table: List[Dict], filters: List[Dict]) -> List[Dict]:
 
 def get_statistical_summary(table: pd.DataFrame, field: str) -> dict:
     """Get comprehensive statistical summary for a numeric field"""
+    # Resolve table reference if needed
+    table = _resolve_dataframe_reference(table, "get_statistical_summary")
+    if table is None:
+        return None
+
     try:
         if table.empty or field not in table.columns:
             return {
@@ -1373,12 +1487,17 @@ def get_statistical_summary(table: pd.DataFrame, field: str) -> dict:
         }
         return convert_numpy_types(stats)
     except Exception as e:
-        print(f"Error in calculating statistical summary for {field}: {e}")
+        print(f"Error in get_statistical_summary for {field}: {e}")
         return None
 
 
 def get_percentile(table: pd.DataFrame, field: str, percentile: float) -> float:
     """Get specific percentile for a numeric field"""
+    # Resolve table reference if needed
+    table = _resolve_dataframe_reference(table, "get_percentile")
+    if table is None:
+        return None
+
     try:
         if table.empty or field not in table.columns:
             return 0.0
@@ -1393,12 +1512,17 @@ def get_percentile(table: pd.DataFrame, field: str, percentile: float) -> float:
         final_result = round(result, 2) if not pd.isna(result) else 0.0
         return convert_numpy_types(final_result)
     except Exception as e:
-        print(f"Error in calculating {percentile}th percentile for {field}: {e}")
+        print(f"Error in get_percentile for {field}: {e}")
         return None
 
 
 def get_top_percentile(table: pd.DataFrame, field: str, percentile: float = 95) -> dict:
     """Get records in top percentile for a field"""
+    # Resolve table reference if needed
+    table = _resolve_dataframe_reference(table, "get_top_percentile")
+    if table is None:
+        return None
+
     try:
         if table.empty or field not in table.columns:
             return {
@@ -1434,12 +1558,17 @@ def get_top_percentile(table: pd.DataFrame, field: str, percentile: float = 95) 
         }
         return convert_numpy_types(result)
     except Exception as e:
-        print(f"Error in calculating top {percentile}% for {field}: {e}")
+        print(f"Error in get_top_percentile for {field}: {e}")
         return None
 
 
 def get_bottom_percentile(table: pd.DataFrame, field: str, percentile: float = 5) -> dict:
     """Get records in bottom percentile for a field"""
+    # Resolve table reference if needed
+    table = _resolve_dataframe_reference(table, "get_bottom_percentile")
+    if table is None:
+        return None
+
     try:
         if table.empty or field not in table.columns:
             return {
@@ -1475,12 +1604,17 @@ def get_bottom_percentile(table: pd.DataFrame, field: str, percentile: float = 5
         }
         return convert_numpy_types(result)
     except Exception as e:
-        print(f"Error in calculating bottom {percentile}% for {field}: {e}")
+        print(f"Error in get_bottom_percentile for {field}: {e}")
         return None
 
 
 def get_correlation_matrix(table: pd.DataFrame, fields: list) -> dict:
     """Calculate correlation matrix between numeric fields"""
+    # Resolve table reference if needed
+    table = _resolve_dataframe_reference(table, "get_correlation_matrix")
+    if table is None:
+        return None
+
     try:
         if table.empty or not fields:
             return {}
@@ -1501,7 +1635,7 @@ def get_correlation_matrix(table: pd.DataFrame, fields: list) -> dict:
         corr_matrix = numeric_data.corr().round(3)
         return convert_numpy_types(corr_matrix.to_dict())
     except Exception as e:
-        print(f"Error in calculating correlation matrix: {e}")
+        print(f"Error in get_correlation_matrix: {e}")
         return None
 
 # ===================================================================
@@ -1816,6 +1950,136 @@ ORDERS_TOOL_REGISTRY = {
     "get_cod_vs_prepaid_metrics": get_cod_vs_prepaid_metrics,
     "get_geographic_insights": get_geographic_insights,
     "get_common_metrics": get_common_metrics,
+}
+
+
+# ===================================================================
+# PRODUCT / SKU METRICS TOOLS (S3)
+# ===================================================================
+
+SKU_METRICS_BUCKET = "chupps-data-portal"
+SKU_METRICS_PREFIX = "sku-metrics"
+SKU_METRICS_REGION = "ap-south-1"
+METRICS_PRESETS_BUCKET = "chupps-data-portal"
+METRICS_PRESETS_PREFIX = "metrics-presets"
+
+
+def list_sku_files(bucket: str = SKU_METRICS_BUCKET, prefix: str = SKU_METRICS_PREFIX) -> list:
+    """List all per-SKU metric JSON files in S3, excluding metadata and insight files."""
+    sku_files = []
+    paginator = s3.get_paginator("list_objects_v2")
+    pages = paginator.paginate(Bucket=bucket, Prefix=f"{prefix}/")
+    for page in pages:
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            filename = key.split("/")[-1]
+            if filename.endswith(".json") and not filename.startswith("_") and not filename.startswith("insights"):
+                sku_files.append(filename.replace(".json", ""))
+    return sku_files
+
+
+def get_sku_metrics_json(sku: str, bucket: str = SKU_METRICS_BUCKET, prefix: str = SKU_METRICS_PREFIX) -> dict:
+    """Fetch the full metrics JSON for a specific SKU from S3."""
+    key = f"{prefix}/{sku}.json"
+    try:
+        response = s3.get_object(Bucket=bucket, Key=key)
+        body = response["Body"].read().decode("utf-8")
+        return json.loads(body)
+    except Exception as e:
+        return {"error": f"Could not fetch metrics for SKU '{sku}': {str(e)}"}
+
+
+def get_insights_json(bucket: str = SKU_METRICS_BUCKET, prefix: str = SKU_METRICS_PREFIX) -> dict:
+    """Fetch the aggregated insights-master.json from S3."""
+    key = f"{prefix}/insights-master.json"
+    try:
+        response = s3.get_object(Bucket=bucket, Key=key)
+        body = response["Body"].read().decode("utf-8")
+        return json.loads(body)
+    except Exception as e:
+        return {"error": f"Could not fetch insights: {str(e)}"}
+
+
+def get_metrics_presets(time_window: str = "7d", bucket: str = METRICS_PRESETS_BUCKET, prefix: str = METRICS_PRESETS_PREFIX) -> dict:
+    """Fetch the latest metrics-presets JSON for a given time window (7d/30d/all) from S3."""
+    try:
+        paginator = s3.get_paginator("list_objects_v2")
+        pages = paginator.paginate(Bucket=bucket, Prefix=f"{prefix}/")
+        dated_folders = []
+        for page in pages:
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                parts = key.split("/")
+                if len(parts) >= 3 and parts[1] not in ("", "_meta"):
+                    dated_folders.append(parts[1])
+        if not dated_folders:
+            return {"error": "No metrics presets found in S3"}
+        latest = sorted(dated_folders)[-1]
+        preset_key = f"{prefix}/{latest}/all.json"
+        response = s3.get_object(Bucket=bucket, Key=preset_key)
+        body = response["Body"].read().decode("utf-8")
+        full_data = json.loads(body)
+        if time_window in full_data:
+            return full_data[time_window]
+        return full_data
+    except Exception as e:
+        return {"error": f"Could not fetch metrics presets: {str(e)}"}
+
+
+def build_sku_index_summary(max_skus: int = 20) -> str:
+    """Build a compact text summary of top SKUs by revenue for LLM system context.
+    
+    Lists up to max_skus with key KPIs (revenue, units, margin, 7d revenue).
+    Designed to stay under ~2000 chars to avoid bloating the system instruction.
+    """
+    try:
+        sku_files = list_sku_files()
+        if not sku_files:
+            return "(No SKU metrics available)"
+
+        summaries = []
+        for sku_name in sku_files[:max_skus * 2]:  # fetch extra in case some fail
+            try:
+                data = get_sku_metrics_json(sku_name)
+                if "error" in data:
+                    continue
+                cum = data.get("cumulative", {})
+                rolling = data.get("rolling", {})
+                r7 = rolling.get("7d", {})
+                summaries.append({
+                    "sku": sku_name,
+                    "revenue": cum.get("total_revenue", 0),
+                    "units": cum.get("total_units_sold", 0),
+                    "margin": cum.get("gross_margin_pct", 0),
+                    "revenue_7d": r7.get("revenue", 0),
+                })
+            except Exception:
+                continue
+            if len(summaries) >= max_skus:
+                break
+
+        if not summaries:
+            return "(No SKU metrics available)"
+
+        summaries.sort(key=lambda x: x["revenue"], reverse=True)
+        lines = []
+        for s in summaries[:max_skus]:
+            lines.append(
+                f"- {s['sku']}: revenue=₹{s['revenue']:,.0f}, units={s['units']}, "
+                f"margin={s['margin']:.1f}%, 7d_revenue=₹{s['revenue_7d']:,.0f}"
+            )
+        header = f"Top {len(lines)} SKUs by total revenue (of {len(sku_files)} total):\n"
+        return header + "\n".join(lines)
+    except Exception as e:
+        return f"(SKU index unavailable: {str(e)})"
+
+
+PRODUCT_TOOL_REGISTRY = {
+    "list_sku_files": list_sku_files,
+    "get_sku_metrics": get_sku_metrics_json,
+    "get_insights": get_insights_json,
+    "get_metrics_presets": get_metrics_presets,
+    "build_sku_index_summary": build_sku_index_summary,
 }
 
 

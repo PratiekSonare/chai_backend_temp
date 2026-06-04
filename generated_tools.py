@@ -1,4 +1,50 @@
 ALL_GENERATED_TOOLS = {
+  "get_sku_index": {
+    "name": "get_sku_index",
+    "description": "List all available product SKUs with summary metrics (revenue, units sold, margin, 7-day revenue). Use this to discover which SKUs exist before querying detailed data.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {},
+      "required": []
+    }
+  },
+  "get_sku_metrics": {
+    "name": "get_sku_metrics",
+    "description": "Fetch detailed metrics for a specific SKU. Returns cumulative stats, rolling 7d/30d/all-time windows, marketplace breakdown, price history, daily series, state distribution, size distribution, courier distribution, and warehouse distribution.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "sku": {
+          "type": "STRING",
+          "description": "The SKU identifier (e.g., 'STYLE-NAME' or 'SKU-12345')"
+        }
+      },
+      "required": ["sku"]
+    }
+  },
+  "get_insights": {
+    "name": "get_insights",
+    "description": "Fetch aggregated product insight cards: best-selling SKUs, trending products, margin leaders, growth accelerators, price volatility, quality issues, and fulfillment performance. Use for cross-SKU analysis and trend questions.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {},
+      "required": []
+    }
+  },
+  "get_metrics_presets": {
+    "name": "get_metrics_presets",
+    "description": "Fetch pre-calculated dashboard metrics for a time window. Returns primary KPIs, product metrics, performance metrics, geographic metrics, channel/payment metrics, order type metrics, quality/risk metrics, and advanced metrics.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "time_window": {
+          "type": "STRING",
+          "description": "Time window: '7d' (last 7 days), '30d' (last 30 days), or 'all' (all time)"
+        }
+      },
+      "required": ["time_window"]
+    }
+  },
   "get_all_orders": {
     "name": "get_all_orders",
     "description": "Fetch and aggregate daily orders from S3 for a date range.",
