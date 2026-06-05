@@ -1,0 +1,11 @@
+[Unit]
+Description=Generate RTO and Forecast presets daily
+
+[Timer]
+# Runs at 00:15:00 UTC, after metrics presets (00:10:30)
+OnCalendar=*-*-* 00:15:00
+Persistent=true
+Unit=generate-rto-forecast-presets.service
+
+[Install]
+WantedBy=timers.target

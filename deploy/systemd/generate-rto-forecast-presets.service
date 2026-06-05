@@ -1,0 +1,15 @@
+[Unit]
+Description=Generate pre-calculated RTO and Forecast presets and upload to S3
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/chupps/backend
+ExecStart=/home/ubuntu/chupps/backend/run_rto_forecast_presets_daily.sh
+StandardOutput=append:/var/log/rto-forecast-presets.log
+StandardError=append:/var/log/rto-forecast-presets.log
+
+[Install]
+WantedBy=multi-user.target
