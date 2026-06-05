@@ -7,9 +7,9 @@ Wants=network-online.target
 Type=oneshot
 User=ubuntu
 WorkingDirectory=/home/ubuntu/chupps/backend
-ExecStart=/home/ubuntu/chupps/backend/run_rto_forecast_presets_daily.sh
-StandardOutput=append:/var/log/rto-forecast-presets.log
-StandardError=append:/var/log/rto-forecast-presets.log
+ExecStart=/home/ubuntu/chupps/backend/run_forecast_presets_daily.sh
+StandardOutput=append:/var/log/forecast-presets.log
+StandardError=append:/var/log/forecast-presets.log
 
 [Install]
 WantedBy=multi-user.target
