@@ -14,3 +14,6 @@ celery
 joblib
 lightgbm
 scikit-learn
+numpy
+prophet
+dill
