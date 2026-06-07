@@ -8,7 +8,7 @@ import uuid
 
 # Import tools and LLM providers
 from tools import apply_filters, get_gross_profit, get_margin, get_markup, get_cost_price, get_selling_price, get_cost_to_price_ratio
-from tools import ORDERS_TOOL_REGISTRY, PROFIT_TOOL_REGISTRY, PAYMENT_CYCLE_TOOL_REGISTRY
+from tools import ORDERS_TOOL_REGISTRY, PROFIT_TOOL_REGISTRY, PAYMENT_CYCLE_TOOL_REGISTRY, INVENTORY_TOOL_REGISTRY
 from llm_providers import query_categorization_llm, planning_llm, filtering_llm, grouping_llm, insight_llm, custom_calculation_llm
 from timeout_utils import RequestTimer, call_with_timeout, create_llm_timeout_wrapper
 
@@ -321,6 +321,8 @@ async def query_categorization_node(state: AgentState) -> AgentState:
                 TOOL_REGISTRY = PROFIT_TOOL_REGISTRY
             elif data_source == "payment_cycle":
                 TOOL_REGISTRY = PAYMENT_CYCLE_TOOL_REGISTRY
+            elif data_source == "inventory":
+                TOOL_REGISTRY = INVENTORY_TOOL_REGISTRY
         except Exception:
             # Fallback to orders registry in case of any issue
             TOOL_REGISTRY = ORDERS_TOOL_REGISTRY
@@ -1245,9 +1247,60 @@ def aggregation_node(state: AgentState) -> AgentState:
             traceback.print_exc()
             return {**state, "error": f"Payment cycle aggregation error: {str(e)}"}
     
+    elif data_source == "inventory":
+        try:
+            aggregated_metrics = {}
+            
+            from inventory_tools import (
+                get_stock_health, get_damage_rate, get_dead_stock,
+                get_qc_performance, get_expiry_risk, get_channel_distribution,
+            )
+            
+            for group_id, result_ref in state["group_results"].items():
+                data = get_cached_result(result_ref)
+                
+                # Convert to DataFrame if needed
+                if isinstance(data, list):
+                    import pandas as pd
+                    df = pd.DataFrame(data)
+                elif isinstance(data, pd.DataFrame):
+                    df = data
+                else:
+                    df = pd.DataFrame()
+                
+                if df.empty:
+                    aggregated_metrics[group_id] = {"error": "No data for group"}
+                    continue
+                
+                metrics = {
+                    "stock_health": get_stock_health(df),
+                    "damage_rate": get_damage_rate(df),
+                    "dead_stock": get_dead_stock(df),
+                    "qc_performance": get_qc_performance(df),
+                    "expiry_risk": get_expiry_risk(df),
+                    "channel_distribution": get_channel_distribution(df),
+                    "sku_count": len(df),
+                }
+                
+                aggregated_metrics[group_id] = metrics
+            
+            print(f"✅ [AGGREGATION] Inventory metrics computed for: {list(aggregated_metrics.keys())}", flush=True)
+            
+            return {
+                **state,
+                "aggregated_metrics": aggregated_metrics,
+                "error": None
+            }
+            
+        except Exception as e:
+            print(f"❌ [AGGREGATION] Inventory Error: {str(e)}", flush=True)
+            return {**state, "error": f"Inventory aggregation error: {str(e)}"}
+    
     else:
         # Fallback for unknown data_source
         return {**state, "error": f"Unsupported data_source: {data_source}"}
+
+# ====================== INVENTORY AGGREGATION ======================
 
 def comparison_node(state: AgentState) -> AgentState:
     """Perform comparison logic between groups - supports both order and profit data"""
@@ -1578,6 +1631,88 @@ def comparison_node(state: AgentState) -> AgentState:
                 
                 print(f"✅ [COMPARISON] Payment Cycle: {num_groups} groups compared | "
                       f"Best Margin: {winner_by_margin}, Most Efficient: {winner_by_efficiency}", flush=True)
+            
+            return {
+                **state,
+                "comparison_results": comparison_results,
+                "error": None
+            }
+        
+        # ====================== INVENTORY COMPARISON ======================
+        elif data_source == "inventory":
+            comparison_results = {
+                "comparison_type": "pairwise" if num_groups == 2 else "multi_group",
+                "comparison_mode": True,
+                "comparison_param": state.get("comparison_param"),
+                "data_source": "inventory",
+                "num_groups": num_groups,
+                "groups": group_ids,
+            }
+            
+            if num_groups == 2:
+                group_a, group_b = group_ids[0], group_ids[1]
+                metrics_a = metrics[group_a]
+                metrics_b = metrics[group_b]
+                
+                health_a = metrics_a.get("stock_health", {})
+                health_b = metrics_b.get("stock_health", {})
+                damage_a = metrics_a.get("damage_rate", {})
+                damage_b = metrics_b.get("damage_rate", {})
+                dead_a = metrics_a.get("dead_stock", {})
+                dead_b = metrics_b.get("dead_stock", {})
+                
+                comparison_results.update({
+                    "groups": {"a": group_a, "b": group_b},
+                    "sku_count": {
+                        "a": metrics_a.get("sku_count", 0),
+                        "b": metrics_b.get("sku_count", 0),
+                    },
+                    "health_score": {
+                        "a": health_a.get("health_score_pct", 0),
+                        "b": health_b.get("health_score_pct", 0),
+                        "diff": round(health_b.get("health_score_pct", 0) - health_a.get("health_score_pct", 0), 2),
+                    },
+                    "damage_rate": {
+                        "a": damage_a.get("damage_rate_pct", 0),
+                        "b": damage_b.get("damage_rate_pct", 0),
+                        "diff": round(damage_b.get("damage_rate_pct", 0) - damage_a.get("damage_rate_pct", 0), 2),
+                    },
+                    "dead_stock_pct": {
+                        "a": dead_a.get("dead_stock_pct", 0),
+                        "b": dead_b.get("dead_stock_pct", 0),
+                        "diff": round(dead_b.get("dead_stock_pct", 0) - dead_a.get("dead_stock_pct", 0), 2),
+                    },
+                    "winner_by_health": group_a if health_a.get("health_score_pct", 0) > health_b.get("health_score_pct", 0) else group_b,
+                    "winner_by_damage": group_a if damage_a.get("damage_rate_pct", 0) < damage_b.get("damage_rate_pct", 0) else group_b,
+                    "winner_by_dead_stock": group_a if dead_a.get("dead_stock_pct", 0) < dead_b.get("dead_stock_pct", 0) else group_b,
+                })
+                
+                print(f"✅ [COMPARISON] Inventory: {group_a} vs {group_b} | "
+                      f"Health Winner: {comparison_results['winner_by_health']}", flush=True)
+            else:
+                group_summaries = {}
+                for group_id in group_ids:
+                    g_metrics = metrics[group_id]
+                    group_summaries[group_id] = {
+                        "sku_count": g_metrics.get("sku_count", 0),
+                        "health_score": g_metrics.get("stock_health", {}).get("health_score_pct", 0),
+                        "damage_rate": g_metrics.get("damage_rate", {}).get("damage_rate_pct", 0),
+                        "dead_stock_pct": g_metrics.get("dead_stock", {}).get("dead_stock_pct", 0),
+                    }
+                
+                winner_by_health = max(group_ids, key=lambda gid: metrics[gid].get("stock_health", {}).get("health_score_pct", 0))
+                lowest_damage = min(group_ids, key=lambda gid: metrics[gid].get("damage_rate", {}).get("damage_rate_pct", 0))
+                
+                comparison_results.update({
+                    "group_summaries": group_summaries,
+                    "overall_winners": {
+                        "by_health": winner_by_health,
+                        "lowest_damage": lowest_damage,
+                    }
+                })
+                
+                print(f"✅ [COMPARISON] Inventory: {num_groups} groups compared | "
+                      f"Healthiest: {winner_by_health}", flush=True)
             
             return {
                 **state,

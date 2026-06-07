@@ -149,8 +149,9 @@ class QueryCategorizationLLM(GeminiLLM):
                     - order (sales, revenue, payment modes, order status, customers)
                     - profit (margins, markups, cost analysis, pricing strategies)
                     - payment_cycle (distributor payments, cash discounts, payment terms, cycles)
+                    - inventory (stock levels, inventory health, damaged goods, dead stock, QC, expiry, warehouse, SKU availability, reorder)
 
-                    Return **only** the single word: "order" or "profit" or "payment_cycle". No explanation, no quotes, no extra text.
+                    Return **only** the single word: "order" or "profit" or "payment_cycle" or "inventory". No explanation, no quotes, no extra text.
 """
 
         try:
@@ -164,7 +165,7 @@ class QueryCategorizationLLM(GeminiLLM):
             # Clean the response
             if isinstance(response_text, str):
                 cleaned = response_text.strip().lower()
-                if cleaned in ["order", "profit", "payment_cycle"]:
+                if cleaned in ["order", "profit", "payment_cycle", "inventory"]:
                     data_source = cleaned
                 else:
                     data_source = "order"   # strict fallback
@@ -258,6 +259,7 @@ class PlanningLLM(GeminiLLM):
         current_date = today.strftime("%Y-%m-%d")
         yesterday = today - timedelta(days=1)
         five_days_ago = today - timedelta(days=5)
+        seven_days_ago = today - timedelta(days=7)
         thirty_days_ago = today - timedelta(days=30)
 
         order_prompt = f""" You are an expert query planning assistant for an e-commerce order management system.
@@ -669,6 +671,142 @@ class PlanningLLM(GeminiLLM):
 
                 Return *only* the JSON object with the structure based on query type.
     """
+
+        inventory_prompt = f"""Today's date is {current_date}.
+
+                CRITICAL: Always use actual dates in YYYY-MM-DD HH:MM:SS format, never placeholders.
+                - "last 7 days": "{seven_days_ago.strftime('%Y-%m-%d')} 00:00:00" to "{today.strftime('%Y-%m-%d')} 23:59:59"
+                - "yesterday": "{yesterday.strftime('%Y-%m-%d')} 00:00:00" to "{yesterday.strftime('%Y-%m-%d')} 23:59:59"
+
+                User Query: "{query}"
+
+                Available tools (use these names only):
+                get_inventory_snapshot, get_stock_health, get_damage_rate, get_dead_stock,
+                get_overstock_risk, get_understock_risk, get_qc_performance, get_expiry_risk,
+                get_channel_distribution, get_category_breakdown, get_brand_breakdown,
+                get_location_breakdown, get_inventory_summary, apply_filters,
+                execute_custom_calculation, get_statistical_summary, get_percentile
+
+                QUERY TYPE GUIDELINES:
+                - schema_discovery → use get_inventory_snapshot to fetch data
+                - metric_analysis → use specific metric tools (get_stock_health, get_damage_rate, etc.)
+                - custom_metric_generation → use execute_custom_calculation
+                - comparison → use multiple metric calls or apply_filters for grouping
+                - standard → simple fetch + optional filters
+
+                Available Schema for 'inventory_snapshot':
+                - "sku" (text) - Stock Keeping Unit identifier
+                - "product_name" (text) - Product description
+                - "category" (text) - Product category
+                - "brand" (text) - Brand name
+                - "location" (text) - Warehouse location
+                - "available_qty" (number) - Available quantity
+                - "received" (number) - Total received
+                - "damaged" (number) - Damaged units
+                - "total_lost" (number) - Lost units
+                - "qc_passed" / "qc_failed" / "qc_pending" (numbers) - QC status
+                - "near_expiry" / "expiry" (numbers) - Expiry risk units
+                - "marketplace_available" (number) - Marketplace stock
+                - "website_inventory" (number) - Website stock
+                - "ecom_inventory" (number) - E-Commerce stock
+                - "retail_inventory" (number) - Retail stock
+
+                Always fetch inventory snapshot using get_inventory_snapshot first (base data source).
+                Prefer built-in metric tools over custom calculation when possible.
+                Use apply_filters early when specific conditions (SKU, category, location) are mentioned.
+
+                Template for generated plan:
+                {{
+                "summarized_query": "4-5 word summary",
+                    "query_type": "standard|comparison|metric_analysis|custom_metric_generation|schema_discovery",
+                "steps": [
+                    {{
+                    "id": "step1",
+                    "tool": "get_inventory_snapshot",
+                    "params": {{
+                        "start_date": "2026-03-05 00:00:00",
+                        "end_date": "2026-03-10 23:59:59"
+                    }},
+                    "depends_on": [],
+                    "save_as": "inventory_raw"
+                    }},
+                    {{
+                    "id": "step2",
+                    "tool": "get_stock_health",
+                    "params": {{
+                        "table": "{{{{inventory_raw}}}}"
+                    }},
+                    "depends_on": ["step1"],
+                    "save_as": "health_result"
+                    }}
+                ],
+                "manipulation": {{
+                    "required": true|false,
+                    "type": "filter"|null
+                }},
+                "base_params": {{
+                    "start_date": "actual date",
+                    "end_date": "actual date"
+                }},
+                "tool": "get_inventory_snapshot"
+                }}
+
+                FEW-SHOT EXAMPLES:
+
+                Query: "What is the current stock health?"
+                {{
+                    "summarized_query": "Current stock health status",
+                    "query_type": "metric_analysis",
+                    "steps": [
+                        {{"id": "step1", "tool": "get_inventory_snapshot", "params": {{"start_date": "{five_days_ago.strftime('%Y-%m-%d')} 00:00:00", "end_date": "{today.strftime('%Y-%m-%d')} 23:59:59"}}, "depends_on": [], "save_as": "inventory_raw"}},
+                        {{"id": "step2", "tool": "get_stock_health", "params": {{"table": "{{{{inventory_raw}}}}"}}, "depends_on": ["step1"], "save_as": "health_result"}}
+                    ],
+                    "manipulation": {{"required": false, "type": null}},
+                    "base_params": {{"start_date": "{five_days_ago.strftime('%Y-%m-%d')} 00:00:00", "end_date": "{today.strftime('%Y-%m-%d')} 23:59:59"}},
+                    "tool": "get_inventory_snapshot"
+                }}
+
+                Query: "Show me dead stock items"
+                {{
+                    "summarized_query": "Dead stock analysis",
+                    "query_type": "metric_analysis",
+                    "steps": [
+                        {{"id": "step1", "tool": "get_inventory_snapshot", "params": {{"start_date": "{five_days_ago.strftime('%Y-%m-%d')} 00:00:00", "end_date": "{today.strftime('%Y-%m-%d')} 23:59:59"}}, "depends_on": [], "save_as": "inventory_raw"}},
+                        {{"id": "step2", "tool": "get_dead_stock", "params": {{"table": "{{{{inventory_raw}}}}"}}, "depends_on": ["step1"], "save_as": "dead_stock_result"}}
+                    ],
+                    "manipulation": {{"required": false, "type": null}},
+                    "base_params": {{"start_date": "{five_days_ago.strftime('%Y-%m-%d')} 00:00:00", "end_date": "{today.strftime('%Y-%m-%d')} 23:59:59"}},
+                    "tool": "get_inventory_snapshot"
+                }}
+
+                Query: "Compare inventory damage rates between Location A and Location B"
+                {{
+                    "summarized_query": "Damage rate by location",
+                    "query_type": "comparison",
+                    "steps": [
+                        {{"id": "step1", "tool": "get_inventory_snapshot", "params": {{"start_date": "{five_days_ago.strftime('%Y-%m-%d')} 00:00:00", "end_date": "{today.strftime('%Y-%m-%d')} 23:59:59"}}, "depends_on": [], "save_as": "inventory_raw"}}
+                    ],
+                    "manipulation": {{"required": true, "type": "filter"}},
+                    "base_params": {{"start_date": "{five_days_ago.strftime('%Y-%m-%d')} 00:00:00", "end_date": "{today.strftime('%Y-%m-%d')} 23:59:59"}},
+                    "tool": "get_inventory_snapshot"
+                }}
+
+                Query: "What is the QC failure rate for SKU 11400-550?"
+                {{
+                    "summarized_query": "QC failure rate SKU",
+                    "query_type": "metric_analysis",
+                    "steps": [
+                        {{"id": "step1", "tool": "get_inventory_snapshot", "params": {{"start_date": "{five_days_ago.strftime('%Y-%m-%d')} 00:00:00", "end_date": "{today.strftime('%Y-%m-%d')} 23:59:59"}}, "depends_on": [], "save_as": "inventory_raw"}},
+                        {{"id": "step2", "tool": "apply_filters", "params": {{"table": "{{{{inventory_raw}}}}", "filters": [{{"field": "sku", "operator": "contains", "value": "11400-550"}}]}}, "depends_on": ["step1"], "save_as": "filtered_raw"}},
+                        {{"id": "step3", "tool": "get_qc_performance", "params": {{"table": "{{{{filtered_raw}}}}"}}, "depends_on": ["step2"], "save_as": "qc_result"}}
+                    ],
+                    "manipulation": {{"required": true, "type": "filter"}},
+                    "base_params": {{"start_date": "{five_days_ago.strftime('%Y-%m-%d')} 00:00:00", "end_date": "{today.strftime('%Y-%m-%d')} 23:59:59"}},
+                    "tool": "get_inventory_snapshot"
+                }}
+
+                Return *only* the JSON object with the structure based on query type.
+    """
         
         # Select prompt
         prompt = ""
@@ -677,6 +815,8 @@ class PlanningLLM(GeminiLLM):
             prompt = profit_prompt
         elif data_source == "payment_cycle":
             prompt = payment_cycle_prompt
+        elif data_source == "inventory":
+            prompt = inventory_prompt
         elif data_source == "order":
             prompt = order_prompt
 
@@ -1019,7 +1159,59 @@ Response: {{
 
 Return ONLY the JSON, no other text."""
 
-        prompt = profit_prompt if data_source == "profit" else (payment_cycle_prompt if data_source == "payment_cycle" else order_prompt)
+        inventory_prompt = f"""You are a comparison group extraction assistant for an inventory management system.
+
+User Query: "{query}"
+
+Your task is to identify what groups are being compared based on the inventory snapshot data.
+
+Available Schema for 'inventory_snapshot':
+- "sku" (text) - Stock Keeping Unit identifier
+- "product_name" (text) - Product name
+- "category" (text) - Product category - Examples: Footwear, Accessories, etc.
+- "brand" (text) - Brand name - Examples: Chupps, etc.
+- "location" (text) - Warehouse location
+- "available_qty" (number) - Available quantity
+- "damaged" (number) - Damaged units
+- "total_lost" (number) - Lost units
+
+Return ONLY a valid JSON object with this structure:
+{{
+  "groups": [
+    {{
+      "group_id": "descriptive_id",
+      "filters": {{
+        "field_name": "value"
+      }}
+    }}
+  ]
+}}
+
+Common comparison dimensions for inventory data (for filters field):
+- location - Warehouse location
+- category - Product category
+- brand - Brand name
+
+Examples:
+Query: "Compare inventory between Warehouse A and Warehouse B"
+Response: {{
+  "groups": [
+    {{"group_id": "warehouse_a", "filters": {{"location": "Warehouse A"}}}},
+    {{"group_id": "warehouse_b", "filters": {{"location": "Warehouse B"}}}}
+  ]
+}}
+
+Query: "Compare Footwear vs Accessories damage rates"
+Response: {{
+  "groups": [
+    {{"group_id": "footwear", "filters": {{"category": "Footwear"}}}},
+    {{"group_id": "accessories", "filters": {{"category": "Accessories"}}}}
+  ]
+}}
+
+Return ONLY the JSON, no other text."""
+
+        prompt = profit_prompt if data_source == "profit" else (payment_cycle_prompt if data_source == "payment_cycle" else (inventory_prompt if data_source == "inventory" else order_prompt))
         
         response = self._generate_content(
             prompt=prompt,

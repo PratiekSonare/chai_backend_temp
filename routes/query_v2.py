@@ -25,6 +25,7 @@ with warnings.catch_warnings():
         PROFIT_TOOL_REGISTRY,
         PAYMENT_CYCLE_TOOL_REGISTRY,
         PRODUCT_TOOL_REGISTRY,
+        INVENTORY_TOOL_REGISTRY,
         list_sku_files,
         get_sku_metrics_json,
         get_insights_json,
@@ -427,7 +428,7 @@ class QueryV2Response(BaseModel):
 CATEGORIZATION_PROMPT = """
 Classify the user's query into:
 1. Query Type: SCHEMA_DISCOVERY | STANDARD_QUERY | COMPARISON_QUERY | METRIC_ANALYSIS
-2. Data Source: orders | profit | payment_cycle
+2. Data Source: orders | profit | payment_cycle | inventory
 
 Respond with format: "QUERY_TYPE,DATA_SOURCE"
 
@@ -439,6 +440,12 @@ Examples:
 - "Margin on SKU-123?" → STANDARD_QUERY,profit
 - "High risk distributors?" → METRIC_ANALYSIS,payment_cycle
 - "Vendor cost sheet?" → SCHEMA_DISCOVERY,profit
+- "What is the stock health?" → STANDARD_QUERY,inventory
+- "Dead stock analysis?" → METRIC_ANALYSIS,inventory
+- "Compare inventory across locations?" → COMPARISON_QUERY,inventory
+- "Damage rate by category?" → METRIC_ANALYSIS,inventory
+- "QC failure rate?" → STANDARD_QUERY,inventory
+- "Channel distribution?" → METRIC_ANALYSIS,inventory
 """
 
 
@@ -470,7 +477,7 @@ def categorize_query(user_query: str) -> tuple:
         data_source = parts[1].strip() if len(parts) > 1 else "orders"
         
         valid_types = ["SCHEMA_DISCOVERY", "STANDARD_QUERY", "COMPARISON_QUERY", "METRIC_ANALYSIS"]
-        valid_sources = ["orders", "profit", "payment_cycle"]
+        valid_sources = ["orders", "profit", "payment_cycle", "inventory"]
         
         query_type = query_type if query_type in valid_types else "STANDARD_QUERY"
         data_source = data_source if data_source in valid_sources else "orders"
@@ -514,6 +521,18 @@ def fetch_payment_cycle_data(distributor_name: str = None) -> str:
         ref_key = f"payment_cycle_{distributor_name or 'all'}"
         MEMORY_STORE[ref_key] = data
         return f"SUCCESS: Fetched {len(data)} distributor records. Reference: '{ref_key}'."
+    except Exception as e:
+        return f"ERROR: {str(e)}"
+
+
+def fetch_inventory_snapshot(start_date: str, end_date: str) -> str:
+    try:
+        df = INVENTORY_TOOL_REGISTRY['get_inventory_snapshot'](start_date, end_date)
+        if df is None or (hasattr(df, 'empty') and df.empty):
+            return "ERROR: No inventory data returned for the given date range."
+        ref_key = f"inventory_{start_date[:10]}_{end_date[:10]}"
+        MEMORY_STORE[ref_key] = df
+        return f"SUCCESS: Fetched inventory snapshot with {len(df)} SKUs. Reference: '{ref_key}'."
     except Exception as e:
         return f"ERROR: {str(e)}"
 
@@ -579,7 +598,8 @@ def _get_registry_for_datasource(data_source: str):
     registry_map = {
         "orders": ORDERS_TOOL_REGISTRY,
         "profit": PROFIT_TOOL_REGISTRY,
-        "payment_cycle": PAYMENT_CYCLE_TOOL_REGISTRY
+        "payment_cycle": PAYMENT_CYCLE_TOOL_REGISTRY,
+        "inventory": INVENTORY_TOOL_REGISTRY,
     }
     return registry_map.get(data_source, ORDERS_TOOL_REGISTRY)
 
@@ -616,6 +636,7 @@ def get_tool_definitions(tool_names: list) -> list:
         "fetch_orders": "get_all_orders",
         "fetch_profit_data": "get_vendor_cost_sheet",
         "fetch_payment_cycle_data": "get_payment_cycle_data",
+        "fetch_inventory_snapshot": "get_inventory_snapshot",
         "get_schema": "get_schema_info",
         "filter_and_format_data": "apply_filters"
     }
@@ -651,6 +672,21 @@ def process_tool_call(tool_name: str, tool_args: dict, data_source: str = "order
             ref_key = f"payment_cycle_{dist or 'all'}"
             MEMORY_STORE[ref_key] = data
             return f"SUCCESS: Fetched {len(data)} distributor records. Reference: '{ref_key}'."
+
+        if tool_name in ["fetch_inventory_snapshot", "get_inventory_snapshot"]:
+            start = tool_args.get("start_date")
+            end = tool_args.get("end_date")
+            if not start or not end:
+                from datetime import date
+                today = date.today()
+                end = today.isoformat()
+                start = (today - __import__('datetime').timedelta(days=7)).isoformat()
+            df = INVENTORY_TOOL_REGISTRY['get_inventory_snapshot'](start, end)
+            if df is None or (hasattr(df, 'empty') and df.empty):
+                return "ERROR: No inventory data returned for the given date range."
+            ref_key = f"inventory_{start[:10]}_{end[:10]}"
+            MEMORY_STORE[ref_key] = df
+            return f"SUCCESS: Fetched inventory snapshot with {len(df)} SKUs. Reference: '{ref_key}'."
 
         # Product / SKU Metrics Tools
         if tool_name in ["get_sku_index", "list_sku_files"]:
@@ -1154,6 +1190,88 @@ WORKFLOW:
             "tools": [
                 "get_payment_cycle_data", "apply_filters", "get_high_risk_distributors",
                 "get_payment_cycle_distribution", "get_cycle_efficiency_score"
+            ],
+        },
+    },
+    "inventory": {
+        "SCHEMA_DISCOVERY": {
+            "system_instruction": """You are a Data Schema Assistant for Inventory.
+Help users understand what inventory data is available and how to query it.
+
+Available fields include: sku, product_name, category, brand, location, available_qty, reserved_picked, damaged, total_lost, qc_passed, qc_failed, marketplace_available, website_inventory, etc.
+
+WORKFLOW:
+1. Call get_inventory_snapshot() to load inventory data
+2. Explain what fields and filters are available
+3. Suggest example queries""",
+            "tools": ["get_inventory_snapshot", "get_inventory_summary"],
+        },
+        "STANDARD_QUERY": {
+            "system_instruction": """You are an Inventory Intelligence Agent.
+Answer questions about stock levels, damage rates, QC performance, and inventory health.
+
+ALLOWED OPERATORS for filters:
+- 'eq': equal to, 'ne': not equal to
+- 'gt': greater than, 'lt': less than
+- 'gte': greater than or equal to, 'lte': less than or equal to
+- 'contains': string contains, 'in': value is in list
+
+WORKFLOW:
+1. get_inventory_snapshot(start_date, end_date) to load data.
+   - If no dates specified, use last 7 days.
+2. Optional: apply_filters(table, filters) to narrow down.
+3. Call specific inventory tools (get_stock_health, get_damage_rate, get_qc_performance, etc.).
+4. For general queries, use the DataFrame reference with apply_filters, execute_custom_calculation, get_statistical_summary.
+
+Always prefer specific tools over custom calculations if they exist.""",
+            "tools": [
+                "get_inventory_snapshot", "get_inventory_summary",
+                "apply_filters", "execute_custom_calculation",
+                "get_stock_health", "get_damage_rate", "get_dead_stock",
+                "get_qc_performance", "get_expiry_risk",
+                "get_channel_distribution", "get_category_breakdown",
+                "get_brand_breakdown", "get_location_breakdown",
+                "get_statistical_summary", "get_percentile",
+            ],
+        },
+        "COMPARISON_QUERY": {
+            "system_instruction": """You are an Inventory Comparison Analyst.
+Compare inventory metrics across locations, categories, brands, or channels.
+
+WORKFLOW:
+1. get_inventory_snapshot(start_date, end_date) to load data.
+2. For EACH group to compare:
+   a. apply_filters(table, [{"field": "...", "operator": "eq", "value": "..."}])
+   b. Call metric tools on the filtered data
+3. Present side-by-side comparison with key metrics.
+
+If no specific tool fits, use execute_custom_calculation with groupby.""",
+            "tools": [
+                "get_inventory_snapshot", "apply_filters",
+                "get_stock_health", "get_damage_rate", "get_qc_performance",
+                "get_channel_distribution", "get_category_breakdown",
+                "execute_custom_calculation",
+            ],
+        },
+        "METRIC_ANALYSIS": {
+            "system_instruction": """You are an Inventory Analytics Agent.
+Find patterns: dead stock, overstock, understock, damage trends, QC failures, channel distribution.
+
+WORKFLOW:
+1. get_inventory_snapshot(start_date, end_date) to load data.
+2. Call specific analysis tools for the requested metric.
+3. For complex analysis, use execute_custom_calculation with the DataFrame.
+
+The DataFrame columns include: sku, product_name, category, brand, location, available_qty, reserved_picked, damaged, total_lost, qc_passed, qc_failed, marketplace_available, website_inventory, etc.""",
+            "tools": [
+                "get_inventory_snapshot",
+                "apply_filters", "execute_custom_calculation",
+                "get_stock_health", "get_damage_rate", "get_dead_stock",
+                "get_overstock_risk", "get_understock_risk",
+                "get_qc_performance", "get_expiry_risk",
+                "get_channel_distribution", "get_category_breakdown",
+                "get_brand_breakdown", "get_location_breakdown",
+                "get_statistical_summary",
             ],
         },
     },

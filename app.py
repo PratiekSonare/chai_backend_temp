@@ -75,6 +75,7 @@ from routes.historyOrders import router as history_orders_router
 from routes.prediction import router as prediction_router
 from routes.batch_scoring import router as batch_scoring_router
 from routes.forecast import router as forecast_router
+from routes.inventory import router as inventory_router
 
 
 app = FastAPI(
@@ -99,6 +100,7 @@ async def startup_event():
     print(f"💳 Payment: POST http://{host}:{port}/payment/chart/radial", flush=True)
     print(f"❌ Cancellation: POST http://{host}:{port}/cancellation/chart/bar", flush=True)
     print(f"🗺️  Geography: POST http://{host}:{port}/geography/chart/pincode", flush=True)
+    print(f"📦 Inventory: GET http://{host}:{port}/inventory/snapshot", flush=True)
     print(f"📖 Docs: http://{host}:{port}/docs", flush=True)
     print(f"📋 ReDoc: http://{host}:{port}/redoc", flush=True)
     print(f"{'='*70}\n", flush=True)
@@ -174,6 +176,7 @@ app.include_router(history_orders_router)
 app.include_router(prediction_router)
 app.include_router(batch_scoring_router)
 app.include_router(forecast_router)
+app.include_router(inventory_router)
 
 
 @app.on_event("startup")

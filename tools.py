@@ -2074,6 +2074,47 @@ def build_sku_index_summary(max_skus: int = 20) -> str:
         return f"(SKU index unavailable: {str(e)})"
 
 
+# ===================================================================
+# INVENTORY TOOL REGISTRY
+# ===================================================================
+from inventory_tools import (
+    get_inventory_snapshot as _inv_get_snapshot,
+    get_stock_health as _inv_stock_health,
+    get_damage_rate as _inv_damage_rate,
+    get_dead_stock as _inv_dead_stock,
+    get_overstock_risk as _inv_overstock,
+    get_understock_risk as _inv_understock,
+    get_qc_performance as _inv_qc,
+    get_expiry_risk as _inv_expiry,
+    get_channel_distribution as _inv_channels,
+    get_category_breakdown as _inv_categories,
+    get_brand_breakdown as _inv_brands,
+    get_location_breakdown as _inv_locations,
+    get_inventory_summary as _inv_summary,
+    apply_inventory_filters as _inv_apply_filters,
+)
+
+INVENTORY_TOOL_REGISTRY = {
+    "get_inventory_snapshot": _inv_get_snapshot,
+    "get_stock_health": _inv_stock_health,
+    "get_damage_rate": _inv_damage_rate,
+    "get_dead_stock": _inv_dead_stock,
+    "get_overstock_risk": _inv_overstock,
+    "get_understock_risk": _inv_understock,
+    "get_qc_performance": _inv_qc,
+    "get_expiry_risk": _inv_expiry,
+    "get_channel_distribution": _inv_channels,
+    "get_category_breakdown": _inv_categories,
+    "get_brand_breakdown": _inv_brands,
+    "get_location_breakdown": _inv_locations,
+    "get_inventory_summary": _inv_summary,
+    "apply_filters": _inv_apply_filters,
+    "execute_custom_calculation": execute_custom_calculation,
+    "get_statistical_summary": get_statistical_summary,
+    "get_percentile": get_percentile,
+}
+
+
 PRODUCT_TOOL_REGISTRY = {
     "list_sku_files": list_sku_files,
     "get_sku_metrics": get_sku_metrics_json,

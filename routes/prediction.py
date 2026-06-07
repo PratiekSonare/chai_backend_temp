@@ -482,7 +482,7 @@ def predict(request: PredictionRequest):
         if not transformed_records:
             raise ValueError("No valid orders could be transformed")
         
-        print("Raw features after transformation:", transformed_records, flush=True)
+        # print("Raw features after transformation:", transformed_records, flush=True)
 
         # Create DataFrame
         transformed_df = pd.DataFrame(transformed_records)
@@ -503,7 +503,7 @@ def predict(request: PredictionRequest):
         except Exception as e:
             logger.warning(f"Feature engineer transformation failed: {e}. Proceeding with raw features.")
         
-        print("Features after feature engineering:", transformed_df.head(), flush=True)
+        # print("Features after feature engineering:", transformed_df.head(), flush=True)
         
         # Get model's expected features
         model_features = get_model_feature_names(model)

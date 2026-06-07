@@ -826,5 +826,190 @@ ALL_GENERATED_TOOLS = {
         "table"
       ]
     }
+  },
+  "get_inventory_snapshot": {
+    "name": "get_inventory_snapshot",
+    "description": "Fetch inventory snapshot data from EasyEcom CSV for a date range. Returns a DataFrame of all SKUs with stock levels, damage, QC, and channel data. Always call this first for inventory queries.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "start_date": {
+          "type": "STRING",
+          "description": "Start date in YYYY-MM-DD format"
+        },
+        "end_date": {
+          "type": "STRING",
+          "description": "End date in YYYY-MM-DD format"
+        }
+      },
+      "required": ["start_date", "end_date"]
+    }
+  },
+  "get_inventory_summary": {
+    "name": "get_inventory_summary",
+    "description": "Get a high-level inventory summary with stock health, channel distribution, category breakdown, QC performance, and alerts.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {},
+      "required": []
+    }
+  },
+  "get_stock_health": {
+    "name": "get_stock_health",
+    "description": "Analyze stock health: available, reserved, damaged, lost, quarantine, repair quantities across all SKUs.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "table": {
+          "type": "STRING",
+          "description": "Reference ID for inventory data (from get_inventory_snapshot)"
+        }
+      },
+      "required": ["table"]
+    }
+  },
+  "get_damage_rate": {
+    "name": "get_damage_rate",
+    "description": "Calculate damage rate and list top damaged SKUs.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "table": {
+          "type": "STRING",
+          "description": "Reference ID for inventory data"
+        }
+      },
+      "required": ["table"]
+    }
+  },
+  "get_dead_stock": {
+    "name": "get_dead_stock",
+    "description": "Identify dead stock items with available quantity but zero or no movement over a period.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "table": {
+          "type": "STRING",
+          "description": "Reference ID for inventory data"
+        },
+        "threshold_days": {
+          "type": "NUMBER",
+          "description": "Number of days of no movement to consider dead stock (default 30)"
+        }
+      },
+      "required": ["table"]
+    }
+  },
+  "get_overstock_risk": {
+    "name": "get_overstock_risk",
+    "description": "Identify SKUs with overstock risk (stock significantly above average levels).",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "table": {
+          "type": "STRING",
+          "description": "Reference ID for inventory data"
+        }
+      },
+      "required": ["table"]
+    }
+  },
+  "get_understock_risk": {
+    "name": "get_understock_risk",
+    "description": "Identify SKUs with understock risk (low or zero available quantity).",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "table": {
+          "type": "STRING",
+          "description": "Reference ID for inventory data"
+        }
+      },
+      "required": ["table"]
+    }
+  },
+  "get_qc_performance": {
+    "name": "get_qc_performance",
+    "description": "Analyze QC pass/fail/pending rates and identify SKUs with high failure rates.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "table": {
+          "type": "STRING",
+          "description": "Reference ID for inventory data"
+        }
+      },
+      "required": ["table"]
+    }
+  },
+  "get_expiry_risk": {
+    "name": "get_expiry_risk",
+    "description": "Identify SKUs at risk of expiry (near expiry or already expired).",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "table": {
+          "type": "STRING",
+          "description": "Reference ID for inventory data"
+        }
+      },
+      "required": ["table"]
+    }
+  },
+  "get_channel_distribution": {
+    "name": "get_channel_distribution",
+    "description": "Show inventory distribution across channels: Marketplace, Website, E-Commerce, Retail, IIA.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "table": {
+          "type": "STRING",
+          "description": "Reference ID for inventory data"
+        }
+      },
+      "required": ["table"]
+    }
+  },
+  "get_category_breakdown": {
+    "name": "get_category_breakdown",
+    "description": "Break down inventory by product category with stock levels and metrics.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "table": {
+          "type": "STRING",
+          "description": "Reference ID for inventory data"
+        }
+      },
+      "required": ["table"]
+    }
+  },
+  "get_brand_breakdown": {
+    "name": "get_brand_breakdown",
+    "description": "Break down inventory by brand with stock levels and metrics.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "table": {
+          "type": "STRING",
+          "description": "Reference ID for inventory data"
+        }
+      },
+      "required": ["table"]
+    }
+  },
+  "get_location_breakdown": {
+    "name": "get_location_breakdown",
+    "description": "Break down inventory by warehouse/location with stock levels.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "table": {
+          "type": "STRING",
+          "description": "Reference ID for inventory data"
+        }
+      },
+      "required": ["table"]
+    }
   }
 }

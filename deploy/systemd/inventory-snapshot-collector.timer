@@ -1,0 +1,11 @@
+[Unit]
+Description=Collect inventory snapshot weekly on Wednesdays at 00:15 UTC
+
+[Timer]
+# Every Wednesday at 00:15 UTC
+OnCalendar=Wed *-*-* 00:15:00
+Persistent=true
+Unit=inventory-snapshot-collector.service
+
+[Install]
+WantedBy=timers.target

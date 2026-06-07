@@ -13,8 +13,9 @@ import uuid
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 from dotenv import load_dotenv
 import json
 from decimal import Decimal
@@ -129,31 +130,74 @@ class CustomJSONResponse(JSONResponse):
 app.default_response_class = CustomJSONResponse
 
 
-# Enable CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "https://localhost:3000",
-        "https://127.0.0.1:3000",
-        "https://www.engineermonke.space",
-        "https://engineermonke.space",
-    ],
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=[
-        "Content-Type",
-        "Authorization", 
-        "Accept",
-        "Origin",
-        "X-Requested-With",
-        "X-Request-ID",
-        "Access-Control-Request-Method",
-        "Access-Control-Request-Headers"
-    ],
-    expose_headers=["*"]
-)
+# Path-based CORS configuration
+DEFAULT_CORS_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://localhost:3000",
+    "https://127.0.0.1:3000",
+    "https://www.engineermonke.space",
+    "https://engineermonke.space",
+]
+DEFAULT_CORS_METHODS = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+DEFAULT_CORS_HEADERS = [
+    "Content-Type",
+    "Authorization",
+    "Accept",
+    "Origin",
+    "X-Requested-With",
+    "X-Request-ID",
+    "Access-Control-Request-Method",
+    "Access-Control-Request-Headers",
+]
+PATHS_ALLOW_ALL_ORIGINS = ["/query-v2/query"]
+
+
+class PathBasedCORSMiddleware(BaseHTTPMiddleware):
+    """Apply permissive CORS (allow all origins) for specific paths,
+    and restricted CORS for everything else."""
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        origin = request.headers.get("origin")
+        is_preflight = request.method == "OPTIONS"
+
+        # Determine which CORS config to use
+        if any(path == p or path.startswith(p + "/") for p in PATHS_ALLOW_ALL_ORIGINS):
+            # Permissive: allow all origins
+            allowed_origin = origin if origin else "*"
+        else:
+            # Restricted: only allow listed origins
+            allowed_origin = origin if origin in DEFAULT_CORS_ORIGINS else None
+
+        # Handle preflight
+        if is_preflight:
+            if allowed_origin is None:
+                return Response(status_code=403)
+            preflight_headers = {
+                "Access-Control-Allow-Origin": allowed_origin,
+                "Access-Control-Allow-Methods": ", ".join(DEFAULT_CORS_METHODS),
+                "Access-Control-Allow-Headers": ", ".join(DEFAULT_CORS_HEADERS),
+                "Access-Control-Max-Age": "1728000",
+            }
+            if allowed_origin != "*":
+                preflight_headers["Access-Control-Allow-Credentials"] = "true"
+            return Response(status_code=204, headers=preflight_headers)
+
+        # For actual requests, add CORS headers to the response
+        response = await call_next(request)
+
+        if allowed_origin is not None:
+            response.headers["Access-Control-Allow-Origin"] = allowed_origin
+            response.headers["Access-Control-Expose-Headers"] = "*"
+            if allowed_origin != "*":
+                response.headers["Access-Control-Allow-Credentials"] = "true"
+
+        return response
+
+
+# Enable CORS (path-based: permissive for /query-v2/query, restricted for everything else)
+app.add_middleware(PathBasedCORSMiddleware)
 
 
 # Include routers

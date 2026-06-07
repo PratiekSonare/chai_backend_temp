@@ -1,0 +1,15 @@
+[Unit]
+Description=Collect weekly inventory snapshot from EasyEcom
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/chupps/backend
+ExecStart=/home/ubuntu/chupps/backend/run_snapshot_collector.sh
+StandardOutput=append:/var/log/inventory-snapshot.log
+StandardError=append:/var/log/inventory-snapshot.log
+
+[Install]
+WantedBy=multi-user.target
