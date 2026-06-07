@@ -417,6 +417,7 @@ class QueryV2Response(BaseModel):
     query_type: str
     data_source: str
     answer: str
+    thinking: Optional[str] = None
     results: Optional[Dict[str, Any]] = None
     logs: Optional[List[Dict]] = None
 
@@ -425,28 +426,41 @@ class QueryV2Response(BaseModel):
 # CATEGORIZATION LOGIC
 # ===================================================================
 
-CATEGORIZATION_PROMPT = """
-Classify the user's query into:
+CATEGORIZATION_PROMPT = """You are a query classifier. Classify the user query into exactly TWO fields:
 1. Query Type: SCHEMA_DISCOVERY | STANDARD_QUERY | COMPARISON_QUERY | METRIC_ANALYSIS
 2. Data Source: orders | profit | payment_cycle | inventory
 
-Respond with format: "QUERY_TYPE,DATA_SOURCE"
+Respond with ONLY: "QUERY_TYPE,DATA_SOURCE" (nothing else).
 
-Examples:
-- "What fields in orders?" → SCHEMA_DISCOVERY,orders
-- "AOV for prepaid orders?" → STANDARD_QUERY,orders
-- "Compare prepaid vs COD?" → COMPARISON_QUERY,orders
-- "Top cities by revenue?" → METRIC_ANALYSIS,orders
-- "Margin on SKU-123?" → STANDARD_QUERY,profit
-- "High risk distributors?" → METRIC_ANALYSIS,payment_cycle
-- "Vendor cost sheet?" → SCHEMA_DISCOVERY,profit
-- "What is the stock health?" → STANDARD_QUERY,inventory
-- "Dead stock analysis?" → METRIC_ANALYSIS,inventory
-- "Compare inventory across locations?" → COMPARISON_QUERY,inventory
-- "Damage rate by category?" → METRIC_ANALYSIS,inventory
-- "QC failure rate?" → STANDARD_QUERY,inventory
-- "Channel distribution?" → METRIC_ANALYSIS,inventory
-"""
+QUERY TYPE RULES:
+- SCHEMA_DISCOVERY: User asks what fields/data is available ("what fields", "what data do we have", "schema")
+- STANDARD_QUERY: User asks for a single metric, value, or fact ("what is the AOV", "show me damage rate", "how many units")
+- COMPARISON_QUERY: User compares two or more groups ("compare X vs Y", "which location has more", "difference between")
+- METRIC_ANALYSIS: User asks for patterns, rankings, distributions, breakdowns ("top 10", "which SKUs", "distribution by", "trends")
+
+DATA SOURCE KEYWORDS (use these to determine the source):
+- orders: order, order_id, AOV, revenue, sales amount, payment mode, COD, prepaid, marketplace order, shipping, delivery, cancelled, returned order, customer, pincode, state, city, courier
+- profit: margin, profit, cost, MRP, selling price, cost price, markup, vendor cost, gross profit
+- payment_cycle: distributor, payment cycle, payment terms, cash discount, CD, payment delay, margin exposure
+- inventory: inventory, stock, available quantity, damaged, dead stock, QC, quality check, expiry, near expiry, warehouse, location stock, channel stock, marketplace available, website inventory, reserved, quarantine, repair, discard, overstock, understock, reorder, stock health, SKU stock, unit count, product quantity, fulfillment stock
+
+EXAMPLES (4 per source, balanced):
+"What fields are in the order data?" → SCHEMA_DISCOVERY,orders
+"What was the AOV last week?" → STANDARD_QUERY,orders
+"Compare COD vs prepaid orders" → COMPARISON_QUERY,orders
+"Top cities by order volume" → METRIC_ANALYSIS,orders
+"What fields are in the profit data?" → SCHEMA_DISCOVERY,profit
+"What is the margin on SKU-123?" → STANDARD_QUERY,profit
+"Compare margins across vendors" → COMPARISON_QUERY,profit
+"Which SKUs have the highest markup?" → METRIC_ANALYSIS,profit
+"What fields are in payment cycle data?" → SCHEMA_DISCOVERY,payment_cycle
+"What is the average payment cycle?" → STANDARD_QUERY,payment_cycle
+"Compare payment terms across distributors" → COMPARISON_QUERY,payment_cycle
+"Which distributors have the longest payment cycles?" → METRIC_ANALYSIS,payment_cycle
+"What fields are in the inventory data?" → SCHEMA_DISCOVERY,inventory
+"What is the current stock health?" → STANDARD_QUERY,inventory
+"Compare stock levels across locations" → COMPARISON_QUERY,inventory
+"Which SKUs have the most dead stock?" → METRIC_ANALYSIS,inventory"""
 
 
 def categorize_query(user_query: str) -> tuple:
@@ -470,21 +484,39 @@ def categorize_query(user_query: str) -> tuple:
             contents=[types.Content(role="user", parts=[types.Part(text=f"{CATEGORIZATION_PROMPT}\n\nUser Query: {user_query}")])],
             initial_model="gemini-2.5-flash"
         )
-        result = response.text.strip().upper()
+        raw_result = response.text.strip()
+        # Strip quotes, periods, and extra whitespace
+        cleaned = raw_result.strip('"\'.,;:').strip()
+        result = cleaned.upper()
         parts = result.split(',')
         
         query_type = parts[0].strip() if len(parts) > 0 else "STANDARD_QUERY"
-        data_source = parts[1].strip() if len(parts) > 1 else "orders"
+        data_source = parts[1].strip() if len(parts) > 1 else ""
         
         valid_types = ["SCHEMA_DISCOVERY", "STANDARD_QUERY", "COMPARISON_QUERY", "METRIC_ANALYSIS"]
         valid_sources = ["orders", "profit", "payment_cycle", "inventory"]
         
         query_type = query_type if query_type in valid_types else "STANDARD_QUERY"
-        data_source = data_source if data_source in valid_sources else "orders"
+        
+        # Try exact match first, then partial match, then fallback to orders
+        if data_source in valid_sources:
+            pass  # exact match
+        else:
+            # Partial match: check if any valid source is contained in the response
+            matched = False
+            for src in valid_sources:
+                if src in data_source.lower():
+                    data_source = src
+                    matched = True
+                    break
+            if not matched:
+                print(f"⚠️  Unrecognized data source '{data_source}' from LLM, defaulting to 'orders'. Raw: {raw_result}")
+                data_source = "orders"
         
         # Store in cache
         _CATEGORIZATION_CACHE[query_hash] = (query_type, data_source, datetime.now())
         
+        print(f"🏷️  Categorize: '{user_query[:50]}' → {query_type}, {data_source} (raw: {raw_result})")
         return query_type, data_source
     except Exception as e:
         print(f"⚠️  Categorization error: {str(e)}")
@@ -1359,6 +1391,9 @@ async def process_query_v2(
         # Get prompt config
         prompt_config = PROMPTS.get(data_source, {}).get(query_type)
         if not prompt_config:
+            # Fallback: try STANDARD_QUERY for the same data source, then orders
+            prompt_config = PROMPTS.get(data_source, {}).get("STANDARD_QUERY")
+        if not prompt_config:
             prompt_config = PROMPTS["orders"]["STANDARD_QUERY"]
         
         system_instruction = prompt_config["system_instruction"]
@@ -1393,6 +1428,7 @@ async def process_query_v2(
         max_iterations = 10
         iteration = 0
         final_answer = None
+        tool_trace = []
         
         # Agentic loop for tool selection
         while iteration < max_iterations:
@@ -1459,6 +1495,16 @@ async def process_query_v2(
                 tool_result = process_tool_call(tool_name, tool_args, data_source)
                 # print(f"   → {tool_result[:150]}")
                 
+                # Record tool trace for thinking
+                result_preview = tool_result[:200] if tool_result else ""
+                is_error = tool_result.startswith("ERROR") if tool_result else False
+                tool_trace.append({
+                    "tool": tool_name,
+                    "args": tool_args,
+                    "result_preview": result_preview,
+                    "success": not is_error,
+                })
+                
                 append_request_log(
                     request_id=request_id,
                     step_key=f"TOOL_{tool_name.upper()}",
@@ -1488,6 +1534,24 @@ async def process_query_v2(
                 status="WARNING"
             )
         
+        # Build thinking trace from tool calls
+        thinking = None
+        if tool_trace:
+            tool_lines = []
+            for i, t in enumerate(tool_trace, 1):
+                status = "✓" if t["success"] else "✗"
+                # Build a short args summary (skip large data refs)
+                arg_parts = []
+                for k, v in t["args"].items():
+                    if isinstance(v, str) and len(v) > 50:
+                        arg_parts.append(f"{k}=\"{v[:40]}...\"")
+                    else:
+                        arg_parts.append(f"{k}={v!r}")
+                args_str = ", ".join(arg_parts)
+                tool_lines.append(f"{i}. {status} **{t['tool']}**({args_str})")
+            
+            thinking = f"Used {len(tool_trace)} tool(s):\n" + "\n".join(tool_lines)
+        
         # Extract actual data from MEMORY_STORE (not LLM response)
         extracted_data = extract_data_from_memory(MEMORY_STORE, data_source)
         
@@ -1510,6 +1574,7 @@ async def process_query_v2(
             "query_type": query_type,
             "data_source": data_source,
             "answer": final_answer or "Calculation completed successfully.",
+            "thinking": thinking,
             "results": results,
             "logs": read_request_logs(request_id)
         }
