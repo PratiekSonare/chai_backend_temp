@@ -1072,8 +1072,8 @@ If no specific tool fits (e.g., "highest selling SKU", "orders with > 2 items"),
 3. convert_to_df(raw) -> creates a DataFrame reference (e.g., 'orders_2026-02-01_df')
 4. execute_custom_calculation(table, calculation_code, metric_name) -> write Pandas code.
    - USE THE DATAFRAME REFERENCE for the 'table' argument.
-   - The DataFrame 'df' has exploded suborders. Fields: suborder_sku, suborder_quantity, suborder_selling_price, total_amount, payment_mode, marketplace, state, city.
-   - Example to find top SKU: result = df['suborder_sku'].value_counts().idxmax()
+   - The DataFrame 'df' has exploded suborders. Fields: suborder_sku, suborder_item_quantity, suborder_selling_price, suborder_model_no, suborder_category, total_amount, payment_mode, marketplace, state, city.
+   - Example to find top SKU: result = df.groupby('suborder_sku')['suborder_item_quantity'].sum().nlargest(5)
    - Assign final value to 'result' variable.""",
             "tools": [
                 "get_all_orders", "apply_filters", "convert_to_df", "get_geographic_insights",

@@ -157,8 +157,8 @@ ORDERS_TOP_LEVEL_FIELDS = {
     ),
 }
 
-# Nested fields (inside suborders array)
-ORDERS_NESTED_FIELDS = {
+# Nested fields (inside suborders array) — as they appear in RAW JSON before flattening
+ORDERS_NESTED_FIELDS_RAW = {
     "sku": FieldDefinition(
         name="sku",
         description="Product SKU (inside suborder)",
@@ -245,8 +245,163 @@ ORDERS_NESTED_FIELDS = {
     ),
 }
 
-# Combine all fields
+# Nested fields AFTER convert_to_df flattening (suborder_ prefix added)
+# These are the actual column names in the DataFrame the LLM writes code against
+ORDERS_NESTED_FIELDS = {
+    "suborder_sku": FieldDefinition(
+        name="suborder_sku",
+        description="Product SKU (from suborder, prefixed after flattening)",
+        data_type="string",
+        examples=["11200-850-9", "10700-810-11"],
+        nested_in="suborders"
+    ),
+    "suborder_brand": FieldDefinition(
+        name="suborder_brand",
+        description="Product brand (from suborder, prefixed after flattening)",
+        data_type="string",
+        examples=["chupps"],
+        nested_in="suborders"
+    ),
+    "suborder_category": FieldDefinition(
+        name="suborder_category",
+        description="Product category (from suborder, prefixed after flattening)",
+        data_type="string",
+        examples=["Slider & Flip Flops"],
+        nested_in="suborders"
+    ),
+    "suborder_productName": FieldDefinition(
+        name="suborder_productName",
+        description="Product name (from suborder, prefixed after flattening)",
+        data_type="string",
+        examples=["10700-810_ROADSTER_Navy_Men"],
+        nested_in="suborders"
+    ),
+    "suborder_selling_price": FieldDefinition(
+        name="suborder_selling_price",
+        description="Selling price per item (from suborder, prefixed after flattening)",
+        data_type="number",
+        examples=[601, 806.55, 903],
+        nested_in="suborders"
+    ),
+    "suborder_mrp": FieldDefinition(
+        name="suborder_mrp",
+        description="Maximum Retail Price (from suborder, prefixed after flattening)",
+        data_type="number",
+        examples=[1299, 1399, 1699],
+        nested_in="suborders"
+    ),
+    "suborder_item_quantity": FieldDefinition(
+        name="suborder_item_quantity",
+        description="Quantity of this item (from suborder, prefixed after flattening)",
+        data_type="number",
+        examples=[1, 2, 5],
+        nested_in="suborders"
+    ),
+    "suborder_item_status": FieldDefinition(
+        name="suborder_item_status",
+        description="Status of individual item (from suborder, prefixed after flattening)",
+        data_type="string",
+        examples=["Delivered", "Cancelled", "Returned", "Shipped", "Confirmed"],
+        nested_in="suborders"
+    ),
+    "suborder_size": FieldDefinition(
+        name="suborder_size",
+        description="Product size (from suborder, prefixed after flattening)",
+        data_type="string",
+        examples=["6", "7", "8", "9", "10", "11"],
+        nested_in="suborders"
+    ),
+    "suborder_cost": FieldDefinition(
+        name="suborder_cost",
+        description="Cost price (from suborder, prefixed after flattening)",
+        data_type="number",
+        examples=[180, 244.5, 280],
+        nested_in="suborders"
+    ),
+    "suborder_tax": FieldDefinition(
+        name="suborder_tax",
+        description="Tax on item (from suborder, prefixed after flattening)",
+        data_type="number",
+        examples=[28.62, 38.41, 43],
+        nested_in="suborders"
+    ),
+    "suborder_weight": FieldDefinition(
+        name="suborder_weight",
+        description="Weight of item in grams (from suborder, prefixed after flattening)",
+        data_type="number",
+        examples=[400],
+        nested_in="suborders"
+    ),
+    "suborder_model_no": FieldDefinition(
+        name="suborder_model_no",
+        description="Model/style name of the product (from suborder, prefixed after flattening)",
+        data_type="string",
+        examples=["CHUPSTER", "ROADSTER", "Pure", "OFFSET", "PLUSH", "STRIKER", "Neko"],
+        nested_in="suborders"
+    ),
+    "suborder_ean": FieldDefinition(
+        name="suborder_ean",
+        description="EAN/barcode of the product (from suborder, prefixed after flattening)",
+        data_type="string",
+        examples=["8905803071351", "8905803053326"],
+        nested_in="suborders"
+    ),
+    "suborder_suborder_quantity": FieldDefinition(
+        name="suborder_suborder_quantity",
+        description="Suborder quantity — NOTE: raw field is 'suborder_quantity' inside suborders, becomes 'suborder_suborder_quantity' after flattening. Use suborder_item_quantity instead.",
+        data_type="number",
+        examples=[1],
+        nested_in="suborders"
+    ),
+    "suborder_marketplace_sku": FieldDefinition(
+        name="suborder_marketplace_sku",
+        description="Marketplace-specific SKU (from suborder, prefixed after flattening)",
+        data_type="string",
+        examples=["11200-850-9", "10700-810_11"],
+        nested_in="suborders"
+    ),
+    "suborder_cancelled_quantity": FieldDefinition(
+        name="suborder_cancelled_quantity",
+        description="Number of units cancelled (from suborder, prefixed after flattening)",
+        data_type="number",
+        examples=[0, 1],
+        nested_in="suborders"
+    ),
+    "suborder_shipped_quantity": FieldDefinition(
+        name="suborder_shipped_quantity",
+        description="Number of units shipped (from suborder, prefixed after flattening)",
+        data_type="number",
+        examples=[0, 1],
+        nested_in="suborders"
+    ),
+    "suborder_returned_quantity": FieldDefinition(
+        name="suborder_returned_quantity",
+        description="Number of units returned (from suborder, prefixed after flattening)",
+        data_type="number",
+        examples=[0, 1],
+        nested_in="suborders"
+    ),
+    "suborder_tax_rate": FieldDefinition(
+        name="suborder_tax_rate",
+        description="Tax rate percentage (from suborder, prefixed after flattening)",
+        data_type="number",
+        examples=[5, 12, 18],
+        nested_in="suborders"
+    ),
+    "suborder_shipment_type": FieldDefinition(
+        name="suborder_shipment_type",
+        description="How the item was shipped — MarketplaceShipped or SelfShip (from suborder, prefixed after flattening)",
+        data_type="string",
+        examples=["MarketplaceShipped", "SelfShip"],
+        nested_in="suborders"
+    ),
+}
+
+# Combine all fields — top-level + flattened nested (post convert_to_df)
 ALL_ORDERS_FIELDS = {**ORDERS_TOP_LEVEL_FIELDS, **ORDERS_NESTED_FIELDS}
+
+# Pre-flatten nested fields (raw JSON names, used for raw data validation only)
+ALL_ORDERS_FIELDS_RAW = {**ORDERS_TOP_LEVEL_FIELDS, **ORDERS_NESTED_FIELDS_RAW}
 
 # ==========================================
 # SCHEMA REGISTRY
@@ -404,11 +559,12 @@ def get_schema_prompt(data_source: str) -> str:
         prompt += f"\n... and {len(top_level_fields) - 30} more fields"
     
     if nested_fields:
-        prompt += f"\n\n### Available Nested Fields (inside suborders array, {len(nested_fields)} fields):"
-        for field_name in list(nested_fields.keys())[:5]:
-            prompt += f"\n- `{field_name}`: (inside suborders)"
-        if len(nested_fields) > 5:
-            prompt += f"\n... and {len(nested_fields) - 5} more nested fields"
+        prompt += f"\n\n### Available Suborder Fields (flattened with suborder_ prefix after convert_to_df, {len(nested_fields)} fields):"
+        for field_name in list(nested_fields.keys())[:10]:
+            field_def = nested_fields[field_name]
+            prompt += f"\n- `{field_name}`: {field_def.description}"
+        if len(nested_fields) > 10:
+            prompt += f"\n... and {len(nested_fields) - 10} more suborder fields"
     
     prompt += f"""
 

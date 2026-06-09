@@ -504,7 +504,7 @@ ALL_GENERATED_TOOLS = {
         },
         "calculation_code": {
           "type": "STRING",
-          "description": "Python code. Example: result = df['suborder_sku'].value_counts().idxmax()"
+          "description": "Python code. Example: result = df.groupby('suborder_sku')['suborder_item_quantity'].sum().nlargest(5)"
         },
         "metric_name": {
           "type": "STRING",
