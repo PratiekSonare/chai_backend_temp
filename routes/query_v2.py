@@ -9,6 +9,7 @@ import uuid
 import warnings
 import threading
 import hashlib
+import asyncio
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any, Tuple
 from fastapi import APIRouter, HTTPException, Header, Request
@@ -310,17 +311,18 @@ When user says:
 ALWAYS convert relative dates to the exact format YYYY-MM-DD before calling get_all_orders."""
 
 
-def generate_content_with_fallback(contents, config=None, initial_model: str = "gemini-2.5-flash", openai_tools: list = None, system_instruction: str = None) -> Any:
+def generate_content_with_fallback(contents, config=None, initial_model: str = "gemini-3.5-flash", openai_tools: list = None, system_instruction: str = None) -> Any:
     """
     Call Gemini generate_content with fallbacks:
-    1. Try gemini-2.5-flash (or initial_model)
-    2. If 503/UNAVAILABLE, try gemini-2.5-pro
-    3. If 503/UNAVAILABLE, try gemini-2.5-flash-lite
-    4. If all Gemini models fail with 503, try OpenRouter (moonshotai/kimi-k2.6:free)
+    1. Try gemini-3.5-flash (or initial_model)
+    2. If 503/UNAVAILABLE, try gemini-3.1-flash-lite
+    3. If 503/UNAVAILABLE, try gemini-2.5-flash
+    4. If 503/UNAVAILABLE, try gemini-2.5-pro
+    5. If all Gemini models fail with 503, try OpenRouter (moonshotai/kimi-k2.6:free)
     Max 3 retries (total attempts of the fallback chain) if all respond with 503.
     """
     import time
-    fallback_models = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"]
+    fallback_models = ["gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro"]
     
     # Ensure initial_model is placed first in the sequence
     if initial_model in fallback_models:
@@ -482,7 +484,7 @@ def categorize_query(user_query: str) -> tuple:
     try:
         response = generate_content_with_fallback(
             contents=[types.Content(role="user", parts=[types.Part(text=f"{CATEGORIZATION_PROMPT}\n\nUser Query: {user_query}")])],
-            initial_model="gemini-2.5-flash"
+            initial_model="gemini-3.5-flash"
         )
         raw_result = response.text.strip()
         # Strip quotes, periods, and extra whitespace
@@ -1377,13 +1379,19 @@ async def process_query_v2(
         
         # Categorize query
         print(f"🔍 Analyzing query: {user_query[:60]}...")
-        query_type, data_source = categorize_query(user_query)
+        append_request_log(
+            request_id=request_id,
+            step_key="CATEGORIZE_START",
+            summary="Classifying query type...",
+            status="START"
+        )
+        query_type, data_source = await asyncio.to_thread(categorize_query, user_query)
         print(f"📌 Query Type: {query_type} | Data Source: {data_source}")
         
         append_request_log(
             request_id=request_id,
             step_key="QUERY_CATEGORIZED",
-            summary=f"Query categorized as {query_type}",
+            summary=f"Query classified as {query_type} ({data_source})",
             details=f"Data source: {data_source}",
             status="INFO"
         )
@@ -1425,7 +1433,7 @@ async def process_query_v2(
         messages = list(session_history)  # copy prior messages
         messages.append(types.Content(role="user", parts=[types.Part(text=user_query)]))
         
-        max_iterations = 10
+        max_iterations = 15
         iteration = 0
         final_answer = None
         tool_trace = []
@@ -1450,15 +1458,30 @@ async def process_query_v2(
             
             print(f"\n--- Iteration {iteration} ---")
             
-            response = generate_content_with_fallback(
+            append_request_log(
+                request_id=request_id,
+                step_key="LLM_CALL_START",
+                summary=f"AI reasoning (iteration {iteration}/{max_iterations})...",
+                status="START"
+            )
+            
+            response = await asyncio.to_thread(
+                generate_content_with_fallback,
                 contents=messages,
                 config=types.GenerateContentConfig(
                     tools=tools,
                     system_instruction=system_instruction_with_date
                 ),
-                initial_model="gemini-2.5-flash",
+                initial_model="gemini-3.5-flash",
                 openai_tools=openai_tools,
                 system_instruction=system_instruction_with_date
+            )
+            
+            append_request_log(
+                request_id=request_id,
+                step_key="LLM_CALL_COMPLETE",
+                summary=f"AI responded with {len(response.parts)} part(s)",
+                status="INFO"
             )
             
             # Check for tool calls
@@ -1485,26 +1508,43 @@ async def process_query_v2(
                 )
                 break
             
-            # Process tool calls
-            tool_results = []
-            for tool_call in tool_calls:
+            # Process tool calls in parallel
+            tool_results = [None] * len(tool_calls)
+            tool_traces_batch = [None] * len(tool_calls)
+
+            # Log all tool starts and print status
+            for idx, tool_call in enumerate(tool_calls):
                 tool_name = tool_call.name
                 tool_args = dict(tool_call.args)
                 print(f"🔧 {tool_name}({tool_args})")
-                
-                tool_result = process_tool_call(tool_name, tool_args, data_source)
-                # print(f"   → {tool_result[:150]}")
-                
-                # Record tool trace for thinking
+                append_request_log(
+                    request_id=request_id,
+                    step_key=f"TOOL_START_{tool_name.upper()}",
+                    summary=f"Running {tool_name}...",
+                    details=str(tool_args)[:200],
+                    status="START"
+                )
+
+            async def _run_tool(idx, tool_call):
+                tool_name = tool_call.name
+                tool_args = dict(tool_call.args)
+                tool_result = await asyncio.to_thread(
+                    process_tool_call, tool_name, tool_args, data_source
+                )
                 result_preview = tool_result[:200] if tool_result else ""
                 is_error = tool_result.startswith("ERROR") if tool_result else False
-                tool_trace.append({
+                tool_traces_batch[idx] = {
                     "tool": tool_name,
                     "args": tool_args,
                     "result_preview": result_preview,
                     "success": not is_error,
-                })
-                
+                }
+                tool_results[idx] = types.Part(
+                    function_response=types.FunctionResponse(
+                        name=tool_name,
+                        response={"result": tool_result}
+                    )
+                )
                 append_request_log(
                     request_id=request_id,
                     step_key=f"TOOL_{tool_name.upper()}",
@@ -1512,15 +1552,12 @@ async def process_query_v2(
                     details=tool_result[:200],
                     status="INFO"
                 )
-                
-                tool_results.append(
-                    types.Part(
-                        function_response=types.FunctionResponse(
-                            name=tool_name,
-                            response={"result": tool_result}
-                        )
-                    )
-                )
+
+            await asyncio.gather(*[
+                _run_tool(idx, tc) for idx, tc in enumerate(tool_calls)
+            ])
+
+            tool_trace.extend(t for t in tool_traces_batch if t is not None)
             
             messages.append(types.Content(role="model", parts=response.parts))
             messages.append(types.Content(role="user", parts=tool_results))
@@ -1553,6 +1590,12 @@ async def process_query_v2(
             thinking = f"Used {len(tool_trace)} tool(s):\n" + "\n".join(tool_lines)
         
         # Extract actual data from MEMORY_STORE (not LLM response)
+        append_request_log(
+            request_id=request_id,
+            step_key="FORMATTING_START",
+            summary="Formatting results...",
+            status="START"
+        )
         extracted_data = extract_data_from_memory(MEMORY_STORE, data_source)
         
         # Format results based on query type
