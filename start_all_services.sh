@@ -2,7 +2,6 @@
 # Start all backend services in parallel
 # Query Service: Port 5001
 # Metrics Service: Port 5002
-# Celery Worker: Background async task processing
 
 set -a
 source .env 2>/dev/null || true
@@ -21,7 +20,6 @@ NC='\033[0m' # No Color
 echo -e "${BLUE}Starting all backend services...${NC}"
 echo -e "${BLUE}Query Service:   http://$HOST:$QUERY_PORT${NC}"
 echo -e "${BLUE}Metrics Service: http://$HOST:$METRICS_PORT${NC}"
-echo -e "${BLUE}Celery Worker:   Background (async tasks)${NC}"
 echo ""
 
 # Start Query Service
@@ -34,15 +32,9 @@ echo "Launching Metrics Service (Port $METRICS_PORT)..."
 bash start_metrics_service.sh &
 METRICS_PID=$!
 
-# Start Celery Worker
-echo "Launching Celery Worker..."
-bash start_celery_worker.sh &
-CELERY_PID=$!
-
 echo -e "${GREEN}✓ Services started${NC}"
 echo "Query Service PID:   $QUERY_PID"
 echo "Metrics Service PID: $METRICS_PID"
-echo "Celery Worker PID:   $CELERY_PID"
 echo ""
 echo -e "${YELLOW}Services running:${NC}"
 echo "  - Query API:       http://localhost:5001/docs"
@@ -58,7 +50,6 @@ trap "
   echo -e '${YELLOW}Shutting down services...${NC}'
   kill $QUERY_PID 2>/dev/null
   kill $METRICS_PID 2>/dev/null
-  kill $CELERY_PID 2>/dev/null
   wait 2>/dev/null
   echo -e '${GREEN}✓ All services stopped${NC}'
   exit 0

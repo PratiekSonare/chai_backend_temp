@@ -15,10 +15,6 @@ from services.history_kpi_cache import (
     set_cached_preset_payload,
     get_cached_batch_all_metrics_payload,
     set_cached_batch_all_metrics_payload,
-    enqueue_preset_refresh,
-    enqueue_all_presets_refresh,
-    enqueue_batch_all_metrics_refresh,
-    enqueue_all_batch_all_metrics_refresh,
     bump_cache_version,
 )
 
@@ -499,8 +495,6 @@ async def kpi_all(request: HistoryOrdersRequest):
             if cached_payload:
                 print(f"🚀 Preset cache HIT: table={request.table_name}, preset={preset}", flush=True)
                 return cached_payload
-            enqueue_preset_refresh(request.table_name, preset)
-
         loop = asyncio.get_event_loop()
         final_response = await loop.run_in_executor(None, build_kpi_response, request, 'database')
 
@@ -532,16 +526,12 @@ def refresh_history_kpi_cache(payload: Optional[Dict[str, Any]] = Body(default=N
             invalidate = bool(invalidate_raw)
 
         version = bump_cache_version(table_name) if invalidate else None
-        enqueue_all_presets_refresh(table_name=table_name, version=version)
-        enqueue_all_batch_all_metrics_refresh(table_name=table_name, version=version)
 
         return {
             "success": True,
             "table_name": table_name,
             "invalidate": invalidate,
             "cache_version": version,
-            "queued_presets": ["7d", "30d", "all"],
-            "queued_scopes": ["kpi-all", "batch-all-metrics"],
             "timestamp": datetime.now().isoformat(),
         }
     except Exception as e:
@@ -4243,8 +4233,6 @@ async def batch_all_metrics(request: HistoryOrdersRequest):
             if cached_payload:
                 print(f"🚀 Batch preset cache HIT: table={request.table_name}, preset={preset}", flush=True)
                 return cached_payload
-            enqueue_batch_all_metrics_refresh(request.table_name, preset)
-        
         # === Fetch data once ===
         df = fetch_historical_orders(request)
         print(f"Data fetched: {len(df)} rows", flush=True)

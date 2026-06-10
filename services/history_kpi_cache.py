@@ -191,43 +191,4 @@ def set_cached_batch_all_metrics_payload(table_name: str, preset: str, payload: 
         return
 
 
-def enqueue_preset_refresh(table_name: str, preset: str, version: int | None = None) -> None:
-    try:
-        from celery_app import celery_app
 
-        celery_app.send_task(
-            "history_kpi.precompute_preset",
-            kwargs={
-                "table_name": table_name,
-                "preset": preset,
-                "cache_version": version,
-            },
-        )
-    except Exception:
-        return
-
-
-def enqueue_all_presets_refresh(table_name: str, version: int | None = None) -> None:
-    for preset in SUPPORTED_PRESETS:
-        enqueue_preset_refresh(table_name=table_name, preset=preset, version=version)
-
-
-def enqueue_batch_all_metrics_refresh(table_name: str, preset: str, version: int | None = None) -> None:
-    try:
-        from celery_app import celery_app
-
-        celery_app.send_task(
-            "history_kpi.precompute_batch_all_metrics_preset",
-            kwargs={
-                "table_name": table_name,
-                "preset": preset,
-                "cache_version": version,
-            },
-        )
-    except Exception:
-        return
-
-
-def enqueue_all_batch_all_metrics_refresh(table_name: str, version: int | None = None) -> None:
-    for preset in SUPPORTED_PRESETS:
-        enqueue_batch_all_metrics_refresh(table_name=table_name, preset=preset, version=version)

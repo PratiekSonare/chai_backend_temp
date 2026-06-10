@@ -10,7 +10,6 @@ pandas
 boto3
 supabase
 google-genai
-celery
 joblib
 lightgbm
 scikit-learn
